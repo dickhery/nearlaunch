@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://github.com/dfinity/icp-cli/raw/refs/tags/v0.3.2/docs/schemas/icp-yaml-schema.json
+
+networks:
+  - name: local
+    mode: managed
+    gateway:
+      port: 0
+
+canisters:
+  - name: launcher_backend
+    recipe:
+      type: "@dfinity/motoko@v5.0.0"
+    settings:
+      freezing_threshold: 7776000
+
+  - name: launcher_factory
+    recipe:
+      type: "@dfinity/motoko@v5.0.0"
+    settings:
+      freezing_threshold: 7776000
+
+  - name: launcher_frontend
+    recipe:
+      type: "@dfinity/asset-canister@v2.2.1"
+      configuration:
+        dir: dist
+        build:
+          - pnpm install --frozen-lockfile
+          - pnpm build

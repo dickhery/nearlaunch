@@ -1,0 +1,146 @@
+type AppConfig = record {
+  name : text;
+  headline : text;
+  description : text;
+  accentColor : text;
+  primaryLink : text;
+  contact : text;
+};
+
+type Template = record {
+  id : text;
+  name : text;
+  description : text;
+  category : text;
+  basePriceUsdCents : nat;
+  active : bool;
+};
+
+type SettlementConfig = record {
+  assetId : text;
+  decimals : nat;
+};
+
+type PaymentDisplayConfig = record {
+  priceCurrency : text;
+  settlementSymbol : text;
+  settlementNetwork : text;
+};
+
+type PricingConfig = record {
+  serviceFeeUsdCents : nat;
+  monthlyFundingUsdCents : nat;
+  creationCycles : nat;
+  monthlyCycles : nat;
+  cycleBuffer : nat;
+};
+
+type PricingBreakdown = record {
+  templateUsdCents : nat;
+  serviceFeeUsdCents : nat;
+  fundingUsdCents : nat;
+  totalUsdCents : nat;
+  initialCycles : nat;
+};
+
+type PublicConfig = record {
+  pricing : PricingConfig;
+  paymentDisplay : PaymentDisplayConfig;
+  settlement : SettlementConfig;
+  ordersEnabled : bool;
+};
+
+type AdminAccess = record {
+  caller : principal;
+  owner : principal;
+  settlementRelayer : principal;
+  isOwner : bool;
+  isAdmin : bool;
+};
+
+type DeploymentStatus = variant {
+  AwaitingPayment;
+  PaymentDetected;
+  CreatingCanister;
+  Live;
+  Failed;
+  RefundRequired;
+};
+
+type DeploymentOrder = record {
+  id : nat;
+  owner : principal;
+  templateId : text;
+  config : AppConfig;
+  fundingMonths : nat;
+  status : DeploymentStatus;
+  requestedAt : int;
+  expectedAmountUsdCents : nat;
+  expectedSettlementAmount : nat;
+  expectedCycles : nat;
+  settlementAsset : text;
+  paymentQuoteId : opt text;
+  depositAddress : opt text;
+  paymentTxHash : opt text;
+  settlementProof : opt text;
+  createdCanisterId : opt principal;
+  appUrl : opt text;
+  error : opt text;
+};
+
+type CreateOrderRequest = record {
+  templateId : text;
+  config : AppConfig;
+  fundingMonths : nat;
+};
+
+type SettlementProof = record {
+  quoteId : text;
+  depositAddress : text;
+  txHash : text;
+  proofId : text;
+  assetId : text;
+  amountOut : nat;
+};
+
+type PlatformStats = record {
+  totalOrders : nat;
+  liveApps : nat;
+  templates : nat;
+};
+
+type ResultOrder = variant { ok : DeploymentOrder; err : text };
+type ResultPricing = variant { ok : PricingBreakdown; err : text };
+type ResultText = variant { ok : text; err : text };
+type ResultUnit = variant { ok; err : text };
+
+service : () -> {
+  addAdmin : (principal) -> (ResultUnit);
+  applyConservativeCyclePreset : () -> (ResultUnit);
+  authorizePaymentQuote : (nat) -> (ResultText);
+  createDeploymentOrder : (CreateOrderRequest) -> (ResultOrder);
+  deployPaidOrder : (nat) -> (ResultOrder);
+  getAdminAccess : () -> (AdminAccess) query;
+  getDeploymentOrder : (nat) -> (opt DeploymentOrder) query;
+  getMyDeployments : (nat, nat) -> (vec DeploymentOrder) query;
+  getOwner : () -> (principal) query;
+  getPublicConfig : () -> (PublicConfig) query;
+  getSettlementConfig : () -> (SettlementConfig) query;
+  getStats : () -> (PlatformStats) query;
+  getTemplate : (text) -> (opt Template) query;
+  listAdmins : () -> (vec principal) query;
+  listPublicDeployments : (nat, nat) -> (vec DeploymentOrder) query;
+  listTemplates : () -> (vec Template) query;
+  markPaymentSettled : (nat, SettlementProof) -> (ResultOrder);
+  markRefundRequired : (nat, text) -> (ResultOrder);
+  quoteDeployment : (text, nat) -> (ResultPricing) query;
+  registerAuthorizedPaymentQuote : (nat, text, text, text) -> (ResultOrder);
+  registerPaymentQuote : (nat, text, text) -> (ResultOrder);
+  removeAdmin : (principal) -> (ResultUnit);
+  setOrdersEnabled : (bool) -> (ResultUnit);
+  setPaymentDisplayConfig : (PaymentDisplayConfig) -> (ResultUnit);
+  setPricingConfig : (PricingConfig) -> (ResultUnit);
+  setSettlementConfig : (SettlementConfig) -> (ResultUnit);
+  setSettlementRelayer : (principal) -> (ResultUnit);
+  upsertTemplate : (Template) -> (ResultUnit);
+}

@@ -1,0 +1,31 @@
+{
+  "name": "near-launch-icp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "relayer": "node relayer/server.mjs",
+    "test:relayer": "node --test relayer/server.test.mjs",
+    "check": "mops check && tsc --noEmit && vite build",
+    "template:build": "mops build app_template",
+    "template:upload": "node scripts/upload-template-wasm.mjs",
+    "bootstrap:local": "node scripts/bootstrap-local.mjs"
+  },
+  "dependencies": {
+    "@icp-sdk/auth": "7.1.0",
+    "@icp-sdk/core": "5.4.0",
+    "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@icp-sdk/bindgen": "0.4.0",
+    "@types/node": "^25.9.3",
+    "typescript": "6.0.3",
+    "vite": "8.0.16"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.0"
+}

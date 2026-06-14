@@ -1,0 +1,67 @@
+type AppConfig = record {
+  name : text;
+  headline : text;
+  description : text;
+  accentColor : text;
+  primaryLink : text;
+  contact : text;
+};
+
+type FactoryDeployRequest = record {
+  orderId : nat;
+  owner : principal;
+  templateId : text;
+  config : AppConfig;
+  initialCycles : nat;
+};
+
+type FactoryDeployError = record {
+  message : text;
+  canisterId : opt principal;
+};
+
+type FactoryDeployResult = variant {
+  ok : principal;
+  err : FactoryDeployError;
+};
+
+type FactoryDeploymentStatus = variant {
+  Creating;
+  Created;
+  Installing;
+  Live;
+  Failed;
+};
+
+type FactoryDeployment = record {
+  orderId : nat;
+  owner : principal;
+  templateId : text;
+  status : FactoryDeploymentStatus;
+  canisterId : opt principal;
+  error : opt text;
+};
+
+type FactoryReadiness = record {
+  cycleBalance : nat;
+  reserveCycles : nat;
+  maxChildCycles : nat;
+  requiredCycles : nat;
+  templateWasmConfigured : bool;
+  templateWasmSize : nat;
+  canDeploy : bool;
+};
+
+type ResultUnit = variant { ok; err : text };
+
+service : () -> {
+  deployOrder : (FactoryDeployRequest) -> (FactoryDeployResult);
+  getCycleBalance : () -> (nat) query;
+  getDeployment : (nat) -> (opt FactoryDeployment) query;
+  getOwner : () -> (principal) query;
+  getReadiness : (nat) -> (FactoryReadiness) query;
+  getTemplateWasmInfo : () -> (
+    record { configured : bool; hash : opt blob; size : nat }
+  ) query;
+  uploadTemplateWasm : (blob, blob) -> (ResultUnit);
+}
