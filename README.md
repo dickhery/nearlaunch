@@ -98,6 +98,11 @@ ICP_RELAYER_PEM_PATH=/absolute/path/to/nearlaunch-relayer.pem
 VITE_RELAYER_URL=https://relayer.example.com
 ```
 
+`RELAYER_ALLOWED_ORIGIN` accepts a comma-separated list when the frontend is
+served from more than one origin. Configure origins only, without paths. A
+trailing slash is normalized, so both `https://example.com` and
+`https://example.com/` match the browser origin `https://example.com`.
+
 Configure the partner credential issued by the NEAR Intents Partner Dashboard.
 The relayer supports `X-API-Key` through `NEAR_1CLICK_API_KEY` and bearer
 authentication through `NEAR_1CLICK_JWT`. Never place either credential in a
@@ -300,7 +305,8 @@ icp canister settings update launcher_frontend \
 
 Deploy the relayer with `RELAYER_MOCK=false`, its protected PEM identity, the
 1Click API key, treasury recipient, backend canister ID, and the exact
-frontend origin. Then visit:
+frontend origin. Restart the relayer after changing its environment. Then
+visit:
 
 ```text
 https://FRONTEND_CANISTER_ID.icp0.io

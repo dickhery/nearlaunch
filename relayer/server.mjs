@@ -36,10 +36,54 @@ function loadDotEnv() {
 
 loadDotEnv();
 
+function normalizeAllowedOrigin(value) {
+  const candidate = value.trim();
+  if (candidate === "*") return candidate;
+
+  const parsed = new URL(candidate);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(
+      `RELAYER_ALLOWED_ORIGIN must use http or https: ${candidate}`,
+    );
+  }
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname && parsed.pathname !== "/")
+  ) {
+    throw new Error(
+      `RELAYER_ALLOWED_ORIGIN must contain origins only, without paths or credentials: ${candidate}`,
+    );
+  }
+  return parsed.origin;
+}
+
+function parseAllowedOrigins(value) {
+  const origins = value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .map(normalizeAllowedOrigin);
+
+  if (origins.length === 0) {
+    throw new Error("RELAYER_ALLOWED_ORIGIN must contain at least one origin.");
+  }
+  if (origins.includes("*") && origins.length > 1) {
+    throw new Error(
+      'RELAYER_ALLOWED_ORIGIN cannot combine "*" with explicit origins.',
+    );
+  }
+  return new Set(origins);
+}
+
 const config = {
   port: Number(process.env.RELAYER_PORT || 8787),
   mock: process.env.RELAYER_MOCK !== "false",
-  allowedOrigin: process.env.RELAYER_ALLOWED_ORIGIN || "*",
+  allowedOrigins: parseAllowedOrigins(
+    process.env.RELAYER_ALLOWED_ORIGIN || "*",
+  ),
   oneClickBaseUrl:
     process.env.NEAR_1CLICK_BASE_URL || "https://1click.chaindefuser.com",
   apiKey: process.env.NEAR_1CLICK_API_KEY || "",
@@ -479,21 +523,38 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "64kb" }));
 
 app.use((request, response, next) => {
-  const origin = request.headers.origin;
-  if (
-    config.allowedOrigin === "*" ||
-    !origin ||
-    origin === config.allowedOrigin
-  ) {
+  const requestOrigin = request.headers.origin;
+  let normalizedRequestOrigin = null;
+  if (requestOrigin) {
+    try {
+      normalizedRequestOrigin = normalizeAllowedOrigin(requestOrigin);
+    } catch {
+      normalizedRequestOrigin = null;
+    }
+  }
+
+  const wildcardAllowed = config.allowedOrigins.has("*");
+  const originAllowed =
+    wildcardAllowed ||
+    (normalizedRequestOrigin !== null &&
+      config.allowedOrigins.has(normalizedRequestOrigin));
+
+  response.vary("Origin");
+  if (originAllowed) {
     response.setHeader(
       "Access-Control-Allow-Origin",
-      config.allowedOrigin === "*" ? "*" : origin || config.allowedOrigin,
+      wildcardAllowed ? "*" : normalizedRequestOrigin,
     );
-    response.setHeader("Vary", "Origin");
     response.setHeader("Access-Control-Allow-Headers", "Content-Type");
     response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    response.setHeader("Access-Control-Max-Age", "600");
   }
-  if (request.method === "OPTIONS") return response.sendStatus(204);
+  if (request.method === "OPTIONS") {
+    if (requestOrigin && !originAllowed) {
+      return response.status(403).json({ error: "Origin is not allowed." });
+    }
+    return response.sendStatus(204);
+  }
   next();
 });
 
