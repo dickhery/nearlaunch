@@ -82,6 +82,7 @@ const RELAYER_URL =
 const canisterEnv = safeGetCanisterEnv();
 const backendCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_backend"];
 const factoryCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_factory"];
+const MIN_CHILD_CYCLES = 1_000_000_000_000n;
 
 const authClient = new AuthClient({
   identityProvider: "https://id.ai/authorize",
@@ -225,6 +226,10 @@ function pricingBreakdown(
   if (!template || !publicConfig) return null;
   const fundingUsdCents =
     BigInt(fundingMonths) * publicConfig.pricing.monthlyFundingUsdCents;
+  const configuredCycles =
+    publicConfig.pricing.creationCycles +
+    publicConfig.pricing.cycleBuffer +
+    BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles;
   return {
     templateUsdCents: template.basePriceUsdCents,
     serviceFeeUsdCents: publicConfig.pricing.serviceFeeUsdCents,
@@ -233,20 +238,23 @@ function pricingBreakdown(
       template.basePriceUsdCents +
       publicConfig.pricing.serviceFeeUsdCents +
       fundingUsdCents,
-    initialCycles:
-      publicConfig.pricing.creationCycles +
-      publicConfig.pricing.cycleBuffer +
-      BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles,
+    initialCycles: childCycleTarget(configuredCycles),
   };
 }
 
 function configuredPlanCycles(fundingMonths: number): bigint {
   if (!publicConfig) return 0n;
-  return (
+  return childCycleTarget(
     publicConfig.pricing.creationCycles +
-    publicConfig.pricing.cycleBuffer +
-    BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles
+      publicConfig.pricing.cycleBuffer +
+      BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles,
   );
+}
+
+function childCycleTarget(configuredCycles: bigint): bigint {
+  return configuredCycles < MIN_CHILD_CYCLES
+    ? MIN_CHILD_CYCLES
+    : configuredCycles;
 }
 
 function settlementLabel(order: DeploymentOrder): string {
@@ -310,12 +318,7 @@ function relayerReadyForOrders(): boolean {
 
 function factoryBalanceRequired(fundingMonths: number): bigint | null {
   if (!publicConfig || !factoryReadiness) return null;
-  return (
-    publicConfig.pricing.creationCycles +
-    publicConfig.pricing.cycleBuffer +
-    BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles +
-    factoryReadiness.reserveCycles
-  );
+  return configuredPlanCycles(fundingMonths) + factoryReadiness.reserveCycles;
 }
 
 function factoryShortfall(fundingMonths: number): bigint | null {
@@ -361,7 +364,7 @@ function factoryCapacityMessage(): string | null {
         ? `${cycles(sixMonthShortfall)} for six-month plans`
         : "",
     ].filter(Boolean);
-    return `Factory capacity currently supports ${planLabel} plans. Add ${upgrades.join(" or ")}. Current balance: ${cycles(factoryReadiness.cycleBalance)}; the ${cycles(factoryReadiness.reserveCycles)} safety reserve is included in these targets.`;
+    return `Factory capacity currently supports ${planLabel} plans. Add ${upgrades.join(" or ")}. Current balance: ${cycles(factoryReadiness.cycleBalance)}; the ${cycles(factoryReadiness.reserveCycles)} deployment reserve is included in these targets.`;
   }
   return null;
 }

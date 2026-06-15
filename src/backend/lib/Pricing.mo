@@ -1,8 +1,9 @@
 import Types "../../shared/Types";
+import CyclePolicy "../../shared/CyclePolicy";
 
 module {
-  public let MIN_CHILD_CYCLES : Nat = 1_000_000_000_000;
-  public let MAX_CHILD_CYCLES : Nat = 5_000_000_000_000;
+  public let MIN_CHILD_CYCLES : Nat = CyclePolicy.MIN_CHILD_CYCLES;
+  public let MAX_CHILD_CYCLES : Nat = CyclePolicy.MAX_CHILD_CYCLES;
   let MAX_USD_CENTS : Nat = 10_000_000;
 
   public func defaultConfig() : Types.PricingConfig {

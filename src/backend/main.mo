@@ -642,13 +642,14 @@ shared (install) actor class LauncherBackend() {
     };
     orders.add(orderId, deploying);
 
+    let deploymentCycles = Nat.max(Pricing.MIN_CHILD_CYCLES, order.expectedCycles);
     let factoryResult = try {
       await factory.deployOrder({
         orderId;
         owner = order.owner;
         templateId = order.templateId;
         config = order.config;
-        initialCycles = order.expectedCycles;
+        initialCycles = deploymentCycles;
       });
     } catch (error) {
       #err({
@@ -662,6 +663,7 @@ shared (install) actor class LauncherBackend() {
         let live = {
           deploying with
           status = #Live;
+          expectedCycles = deploymentCycles;
           createdCanisterId = ?canisterId;
           appUrl = ?("https://" # canisterId.toText() # ".raw.icp0.io");
           error = null;
@@ -674,6 +676,7 @@ shared (install) actor class LauncherBackend() {
         let failed = {
           deploying with
           status = #Failed;
+          expectedCycles = deploymentCycles;
           createdCanisterId = failure.canisterId;
           error = ?failure.message;
         };

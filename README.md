@@ -223,9 +223,11 @@ The conservative defaults allocate:
 - 3-month plan: 1.1T cycles
 - 6-month plan: 1.25T cycles
 
-The factory retains a separate 1T safety reserve, so the corresponding
-readiness balances are 2T, 2.1T, and 2.25T. The reserve is not transferred to
-each child.
+The factory also requires a separate 1T safety reserve plus a 0.25T deployment
+overhead buffer for the management-canister creation fee and any measured
+post-create top-up needed before Wasm installation. The corresponding readiness
+balances are 2.25T, 2.35T, and 2.5T. The reserve/overhead is held by the
+factory and only a measured top-up shortfall is transferred to each child.
 
 Existing deployments keep their stable pricing configuration after an
 upgrade. Apply the conservative preset once to migrate an older installation;
@@ -356,10 +358,11 @@ icp deploy launcher_frontend -e ic --identity nearlaunch-deployer
   order's deposit address.
 - Only the configured relayer may register quotes or settle/refund orders.
 - New orders are rejected before payment if the template Wasm is missing or
-  the factory does not have the quoted child cycles plus its reserve.
-- Each child must receive at least 1T cycles and may receive no more than 5T.
-  Generated apps use a 30-day freezing threshold, while the platform
-  canisters retain their more conservative 90-day threshold.
+  the factory does not have the quoted child cycles plus its readiness reserve
+  and deployment overhead.
+- Each child must receive at least 1T cycles after canister creation fees and
+  may receive no more than 5T. Generated apps use a 30-day freezing threshold,
+  while the platform canisters retain their more conservative 90-day threshold.
 - The generated app template has no timers, inter-canister calls, or HTTPS
   outcalls. Browser-to-relayer requests run off-chain and do not consume
   canister cycles.

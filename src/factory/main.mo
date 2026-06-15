@@ -1,12 +1,14 @@
 import Blob "mo:core/Blob";
 import Cycles "mo:core/Cycles";
 import Error "mo:core/Error";
+import Int "mo:core/Int";
 import Map "mo:core/Map";
 import Nat "mo:core/Nat";
 import Principal "mo:core/Principal";
 import Result "mo:core/Result";
 import Runtime "mo:core/Runtime";
 import Sha256 "mo:sha2/Sha256";
+import CyclePolicy "../shared/CyclePolicy";
 import Types "../shared/Types";
 
 shared (install) actor class LauncherFactory() = Self {
@@ -21,9 +23,9 @@ shared (install) actor class LauncherFactory() = Self {
   var appWasm : ?Blob = null;
   var appWasmHash : ?Blob = null;
 
-  let FACTORY_RESERVE : Nat = 1_000_000_000_000;
-  let MIN_CHILD_CYCLES : Nat = 1_000_000_000_000;
-  let MAX_CHILD_CYCLES : Nat = 5_000_000_000_000;
+  let FACTORY_RESERVE : Nat = CyclePolicy.FACTORY_RESERVE_CYCLES;
+  let MIN_CHILD_CYCLES : Nat = CyclePolicy.MIN_CHILD_CYCLES;
+  let MAX_CHILD_CYCLES : Nat = CyclePolicy.MAX_CHILD_CYCLES;
   let MAX_WASM_BYTES : Nat = 1_900_000;
 
   transient let launcherCanisterId = switch (
@@ -45,8 +47,18 @@ shared (install) actor class LauncherFactory() = Self {
     canister_id : Principal;
   };
 
+  type CanisterStatus = {
+    status : { #running; #stopping; #stopped };
+    memory_size : Nat;
+    cycles : Nat;
+    settings : CanisterSettings;
+    module_hash : ?Blob;
+  };
+
   transient let ic : actor {
     create_canister : shared ({ settings : ?CanisterSettings }) -> async CreateCanisterResult;
+    canister_status : shared ({ canister_id : Principal }) -> async CanisterStatus;
+    deposit_cycles : shared ({ canister_id : Principal }) -> async ();
     install_code : shared ({
       mode : { #install; #reinstall; #upgrade };
       canister_id : Principal;
@@ -79,6 +91,31 @@ shared (install) actor class LauncherFactory() = Self {
     #err({ message; canisterId });
   };
 
+  func childCycleTarget(requestedCycles : Nat) : Nat {
+    CyclePolicy.childCycleTarget(requestedCycles);
+  };
+
+  func hasDeploymentCapacity(childCycles : Nat) : Bool {
+    Cycles.balance() >= CyclePolicy.requiredFactoryBalance(childCycles);
+  };
+
+  func hasTopUpCapacity(shortfall : Nat) : Bool {
+    Cycles.balance() >= shortfall + FACTORY_RESERVE;
+  };
+
+  func ensureChildFunded(canisterId : Principal, targetCycles : Nat) : async () {
+    let status = await ic.canister_status({ canister_id = canisterId });
+    if (status.cycles >= targetCycles) return;
+
+    let shortfall = Int.abs(targetCycles.toInt() - status.cycles.toInt());
+    if (not hasTopUpCapacity(shortfall)) {
+      Runtime.trap("Factory does not have enough cycles to top up the child canister.");
+    };
+
+    await (with cycles = shortfall)
+      ic.deposit_cycles({ canister_id = canisterId });
+  };
+
   public query func getOwner() : async Principal {
     owner;
   };
@@ -107,6 +144,7 @@ shared (install) actor class LauncherFactory() = Self {
   };
 
   public query func getReadiness(requiredCycles : Nat) : async Types.FactoryReadiness {
+    let targetCycles = childCycleTarget(requiredCycles);
     let cycleBalance = Cycles.balance();
     let templateWasmSize = switch (appWasm) {
       case (?wasm) wasm.size();
@@ -115,15 +153,15 @@ shared (install) actor class LauncherFactory() = Self {
     let templateWasmConfigured = appWasm != null;
     {
       cycleBalance;
-      reserveCycles = FACTORY_RESERVE;
+      reserveCycles = CyclePolicy.readinessReserveCycles();
       maxChildCycles = MAX_CHILD_CYCLES;
-      requiredCycles;
+      requiredCycles = targetCycles;
       templateWasmConfigured;
       templateWasmSize;
       canDeploy =
         templateWasmConfigured and
-        requiredCycles <= MAX_CHILD_CYCLES and
-        cycleBalance >= requiredCycles + FACTORY_RESERVE;
+        targetCycles <= MAX_CHILD_CYCLES and
+        cycleBalance >= CyclePolicy.requiredFactoryBalance(targetCycles);
     };
   };
 
@@ -149,10 +187,11 @@ shared (install) actor class LauncherFactory() = Self {
     request : Types.FactoryDeployRequest
   ) : async Types.FactoryDeployResult {
     requireLauncher(caller);
+    let targetCycles = childCycleTarget(request.initialCycles);
     if (request.initialCycles < MIN_CHILD_CYCLES) {
       return failure("Requested child cycle allocation is below the factory's 1T minimum.", null);
     };
-    if (request.initialCycles > MAX_CHILD_CYCLES) {
+    if (targetCycles > MAX_CHILD_CYCLES) {
       return failure("Requested child cycle allocation exceeds the factory limit.", null);
     };
 
@@ -188,15 +227,33 @@ shared (install) actor class LauncherFactory() = Self {
           switch (deployment.canisterId) {
             case (?value) value;
             case (null) {
-              let created = await createChild(request);
+              let created = await createChild(request, targetCycles);
               created;
             };
           };
         };
         case (null) {
-          let created = await createChild(request);
+          let created = await createChild(request, targetCycles);
           created;
         };
+      };
+
+      try {
+        await ensureChildFunded(canisterId, targetCycles);
+      } catch (error) {
+        let message = "Canister funding failed: " # error.message();
+        deployments.add(
+          request.orderId,
+          {
+            orderId = request.orderId;
+            owner = request.owner;
+            templateId = request.templateId;
+            status = #Failed;
+            canisterId = ?canisterId;
+            error = ?message;
+          },
+        );
+        return failure(message, ?canisterId);
       };
 
       deployments.add(
@@ -269,8 +326,8 @@ shared (install) actor class LauncherFactory() = Self {
     };
   };
 
-  func createChild(request : Types.FactoryDeployRequest) : async Principal {
-    if (Cycles.balance() < request.initialCycles + FACTORY_RESERVE) {
+  func createChild(request : Types.FactoryDeployRequest, targetCycles : Nat) : async Principal {
+    if (not hasDeploymentCapacity(targetCycles)) {
       Runtime.trap("Factory does not have enough cycles for this deployment.");
     };
 
@@ -286,7 +343,7 @@ shared (install) actor class LauncherFactory() = Self {
       },
     );
 
-    let created = await (with cycles = request.initialCycles)
+    let created = await (with cycles = targetCycles)
       ic.create_canister({
         settings = ?{
           controllers = ?[Principal.fromActor(Self), request.owner];
