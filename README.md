@@ -10,7 +10,7 @@ cycles and the user's principal installed as a controller.
 - `launcher_frontend`: certified asset canister containing the Vite UI.
 - `launcher_backend`: templates, fixed-price orders, settlement proofs, and
   deployment status. It also stores pricing, payment labels, order availability,
-  and the web-admin allowlist.
+  canceled-order audit state, and the web-admin allowlist.
 - `launcher_factory`: holds approved child Wasm, creates canisters, funds them
   with cycles, and installs the selected configuration.
 - `app_template`: the generated Motoko landing-page canister.
@@ -319,6 +319,35 @@ icp canister call launcher_factory getCycleBalance '()' \
   -e ic --query
 ```
 
+## Order Cancellation And Preview
+
+Orders with no payment quote can be canceled immediately by their owner. The
+backend retains the original order for audit purposes, removes it from
+`getMyDeployments`, clears outstanding authorizations, and rejects any later
+quote, settlement, refund, or deployment attempt for that order.
+
+Quoted orders use a second short-lived authorization. The relayer verifies that
+the deposit address belongs to the order and checks 1Click before submitting the
+cancellation on-chain. Mock quotes can be canceled while they are
+`PENDING_DEPOSIT`. Real quotes must be past their deadline and still report
+`PENDING_DEPOSIT`; detected, processing, incomplete, successful, failed, or
+refunded payments are not automatically canceled.
+
+The launcher renders a script-free sandboxed preview while the user edits the
+form and again from the exact configuration stored in the selected order. The
+preview mirrors the generated app template's current HTML and CSS, but the
+deployed child canister remains the source of truth.
+
+After deploying this interface change, upgrade `launcher_backend` and
+`launcher_frontend`, then restart the relayer so it loads the regenerated
+backend Candid declarations:
+
+```bash
+icp deploy launcher_backend -e ic --identity nearlaunch-deployer
+VITE_RELAYER_URL=https://relayer.example.com \
+icp deploy launcher_frontend -e ic --identity nearlaunch-deployer
+```
+
 ## Operational Notes
 
 - Payment settlement is idempotent: each proof ID can be consumed once.
@@ -337,6 +366,8 @@ icp canister call launcher_factory getCycleBalance '()' \
 - The factory accepts only owner-uploaded Wasm whose SHA-256 matches.
 - Child canisters are created with the factory and user as controllers.
 - State uses stable Motoko data structures and survives upgrades.
+- Adding the canceled-order indexes is an implicit compatible Motoko upgrade;
+  the persisted `DeploymentOrder` record and status variant are unchanged.
 - The launcher frontend is certified. Generated child pages currently use the
   raw ICP HTTP domain because their dynamic response is not yet certified.
   Replace the child renderer with certified HTTP responses or generated asset
@@ -346,5 +377,5 @@ icp canister call launcher_factory getCycleBalance '()' \
 
 - [ICP CLI documentation](https://cli.internetcomputer.org/)
 - [ICP app skills](https://skills.internetcomputer.org/)
-- [NEAR 1Click quickstart](https://docs.near-intents.org/near-intents/integration/distribution-channels/1click-api/quickstart)
-- [NEAR 1Click API reference](https://docs.near-intents.org/near-intents/integration/distribution-channels/1click-api)
+- [NEAR 1Click quickstart](https://docs.near-intents.org/integration/distribution-channels/1click-api/quickstart)
+- [NEAR 1Click API reference](https://docs.near-intents.org/integration/distribution-channels/1click-api/)

@@ -117,7 +117,10 @@ type ResultUnit = variant { ok; err : text };
 service : () -> {
   addAdmin : (principal) -> (ResultUnit);
   applyConservativeCyclePreset : () -> (ResultUnit);
+  authorizeDeploymentCancellation : (nat) -> (ResultText);
   authorizePaymentQuote : (nat) -> (ResultText);
+  cancelAuthorizedDeploymentOrder : (nat, text, text) -> (ResultOrder);
+  cancelDeploymentOrder : (nat) -> (ResultOrder);
   createDeploymentOrder : (CreateOrderRequest) -> (ResultOrder);
   deployPaidOrder : (nat) -> (ResultOrder);
   getAdminAccess : () -> (AdminAccess) query;

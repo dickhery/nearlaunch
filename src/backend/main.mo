@@ -75,16 +75,19 @@ shared (install) actor class LauncherBackend() {
   };
 
   let orders = Map.empty<Nat, Types.DeploymentOrder>();
+  let canceledOrders = Set.empty<Nat>();
   var nextOrderId : Nat = 1;
   var liveAppCount : Nat = 0;
   let usedSettlementProofs = Set.empty<Text>();
-  type QuoteAuthorization = {
+  type OrderAuthorization = {
     orderId : Nat;
     owner : Principal;
     expiresAt : Int;
   };
-  let quoteAuthorizations = Map.empty<Text, QuoteAuthorization>();
+  let quoteAuthorizations = Map.empty<Text, OrderAuthorization>();
   let activeQuoteAuthorizationByOrder = Map.empty<Nat, Text>();
+  let cancellationAuthorizations = Map.empty<Text, OrderAuthorization>();
+  let activeCancellationAuthorizationByOrder = Map.empty<Nat, Text>();
 
   transient let factoryCanisterId = switch (
     Runtime.envVar<system>("PUBLIC_CANISTER_ID:launcher_factory")
@@ -126,6 +129,33 @@ shared (install) actor class LauncherBackend() {
       case (?order) order;
       case (null) Runtime.trap("Deployment order not found.");
     };
+  };
+
+  func clearQuoteAuthorization(orderId : Nat) {
+    switch (activeQuoteAuthorizationByOrder.get(orderId)) {
+      case (?token) {
+        activeQuoteAuthorizationByOrder.remove(orderId);
+        quoteAuthorizations.remove(token);
+      };
+      case (null) {};
+    };
+  };
+
+  func clearCancellationAuthorization(orderId : Nat) {
+    switch (activeCancellationAuthorizationByOrder.get(orderId)) {
+      case (?token) {
+        activeCancellationAuthorizationByOrder.remove(orderId);
+        cancellationAuthorizations.remove(token);
+      };
+      case (null) {};
+    };
+  };
+
+  func hasPaymentActivity(order : Types.DeploymentOrder) : Bool {
+    order.paymentQuoteId != null or
+    order.depositAddress != null or
+    order.paymentTxHash != null or
+    order.settlementProof != null;
   };
 
   func pageLimit(limit : Nat) : Nat {
@@ -266,6 +296,34 @@ shared (install) actor class LauncherBackend() {
     #ok(order);
   };
 
+  public shared ({ caller }) func cancelDeploymentOrder(
+    orderId : Nat
+  ) : async Result.Result<Types.DeploymentOrder, Text> {
+    switch (Validation.requireAuthenticated(caller)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+
+    let order = getOrderOrTrap(orderId);
+    if (caller != order.owner and caller != owner) {
+      return #err("Caller does not own this order.");
+    };
+    if (canceledOrders.contains(orderId)) return #ok(order);
+    if (order.status != #AwaitingPayment) {
+      return #err("Only orders awaiting payment can be canceled.");
+    };
+    if (hasPaymentActivity(order)) {
+      return #err(
+        "This order already has a payment quote. Its quote status must be checked before cancellation."
+      );
+    };
+
+    clearQuoteAuthorization(orderId);
+    clearCancellationAuthorization(orderId);
+    canceledOrders.add(orderId);
+    #ok(order);
+  };
+
   public shared ({ caller }) func registerAuthorizedPaymentQuote(
     orderId : Nat,
     authorization : Text,
@@ -279,6 +337,9 @@ shared (install) actor class LauncherBackend() {
     };
 
     let order = getOrderOrTrap(orderId);
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order was canceled before payment.");
+    };
     if (order.paymentQuoteId == ?quoteId and order.depositAddress == ?depositAddress) {
       return #ok(order);
     };
@@ -325,6 +386,9 @@ shared (install) actor class LauncherBackend() {
     };
 
     let order = getOrderOrTrap(orderId);
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order was canceled before payment.");
+    };
     if (order.paymentQuoteId == ?quoteId and order.depositAddress == ?depositAddress) {
       return #ok(order);
     };
@@ -338,13 +402,7 @@ shared (install) actor class LauncherBackend() {
       depositAddress = ?depositAddress;
     };
     orders.add(orderId, updated);
-    switch (activeQuoteAuthorizationByOrder.get(orderId)) {
-      case (?token) {
-        activeQuoteAuthorizationByOrder.remove(orderId);
-        quoteAuthorizations.remove(token);
-      };
-      case (null) {};
-    };
+    clearQuoteAuthorization(orderId);
     #ok(updated);
   };
 
@@ -357,6 +415,9 @@ shared (install) actor class LauncherBackend() {
     };
     let order = getOrderOrTrap(orderId);
     if (caller != order.owner) return #err("Caller does not own this order.");
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order was canceled before payment.");
+    };
     if (order.status != #AwaitingPayment) {
       return #err("Order is no longer awaiting payment.");
     };
@@ -368,7 +429,11 @@ shared (install) actor class LauncherBackend() {
     };
 
     let currentOrder = getOrderOrTrap(orderId);
-    if (caller != currentOrder.owner or currentOrder.status != #AwaitingPayment) {
+    if (
+      caller != currentOrder.owner or
+      currentOrder.status != #AwaitingPayment or
+      canceledOrders.contains(orderId)
+    ) {
       return #err("Order changed while authorizing the payment quote.");
     };
 
@@ -389,6 +454,105 @@ shared (install) actor class LauncherBackend() {
     #ok(token);
   };
 
+  public shared ({ caller }) func authorizeDeploymentCancellation(
+    orderId : Nat
+  ) : async Result.Result<Text, Text> {
+    switch (Validation.requireAuthenticated(caller)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+
+    let order = getOrderOrTrap(orderId);
+    if (caller != order.owner) return #err("Caller does not own this order.");
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order is already canceled.");
+    };
+    if (order.status != #AwaitingPayment) {
+      return #err("Only orders awaiting payment can be canceled.");
+    };
+    if (order.paymentQuoteId == null or order.depositAddress == null) {
+      return #err("This order does not require a relayer cancellation check.");
+    };
+    if (order.paymentTxHash != null or order.settlementProof != null) {
+      return #err("This order already has payment activity.");
+    };
+
+    let random = try {
+      await ic.raw_rand();
+    } catch (error) {
+      return #err("Could not authorize order cancellation: " # error.message());
+    };
+
+    let currentOrder = getOrderOrTrap(orderId);
+    if (
+      caller != currentOrder.owner or
+      currentOrder.status != #AwaitingPayment or
+      canceledOrders.contains(orderId) or
+      currentOrder.paymentQuoteId != order.paymentQuoteId or
+      currentOrder.depositAddress != order.depositAddress or
+      currentOrder.paymentTxHash != null or
+      currentOrder.settlementProof != null
+    ) {
+      return #err("Order changed while authorizing cancellation.");
+    };
+
+    let token = randomToken(random);
+    clearCancellationAuthorization(orderId);
+    cancellationAuthorizations.add(
+      token,
+      {
+        orderId;
+        owner = caller;
+        expiresAt = Time.now() + 600_000_000_000;
+      },
+    );
+    activeCancellationAuthorizationByOrder.add(orderId, token);
+    #ok(token);
+  };
+
+  public shared ({ caller }) func cancelAuthorizedDeploymentOrder(
+    orderId : Nat,
+    authorization : Text,
+    depositAddress : Text,
+  ) : async Result.Result<Types.DeploymentOrder, Text> {
+    requireRelayer(caller);
+    let order = getOrderOrTrap(orderId);
+
+    if (canceledOrders.contains(orderId)) return #ok(order);
+    if (order.status != #AwaitingPayment) {
+      return #err("Only orders awaiting payment can be canceled.");
+    };
+    if (order.paymentQuoteId == null or order.depositAddress != ?depositAddress) {
+      return #err("Payment quote details do not match this order.");
+    };
+    if (order.paymentTxHash != null or order.settlementProof != null) {
+      return #err("This order already has payment activity.");
+    };
+
+    let authorizationRecord = switch (
+      cancellationAuthorizations.get(authorization)
+    ) {
+      case (null) return #err("Cancellation authorization is invalid or already used.");
+      case (?value) value;
+    };
+    if (authorizationRecord.expiresAt < Time.now()) {
+      cancellationAuthorizations.remove(authorization);
+      activeCancellationAuthorizationByOrder.remove(orderId);
+      return #err("Cancellation authorization has expired.");
+    };
+    if (
+      authorizationRecord.orderId != orderId or
+      authorizationRecord.owner != order.owner
+    ) {
+      return #err("Cancellation authorization does not match this order.");
+    };
+
+    clearQuoteAuthorization(orderId);
+    clearCancellationAuthorization(orderId);
+    canceledOrders.add(orderId);
+    #ok(order);
+  };
+
   public shared ({ caller }) func markPaymentSettled(
     orderId : Nat,
     proof : Types.SettlementProof,
@@ -396,6 +560,9 @@ shared (install) actor class LauncherBackend() {
     requireRelayer(caller);
     let order = getOrderOrTrap(orderId);
 
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order was canceled before payment.");
+    };
     if (order.settlementProof == ?proof.proofId) return #ok(order);
     if (usedSettlementProofs.contains(proof.proofId)) {
       return #err("Settlement proof has already been used.");
@@ -436,6 +603,9 @@ shared (install) actor class LauncherBackend() {
   ) : async Result.Result<Types.DeploymentOrder, Text> {
     requireRelayer(caller);
     let order = getOrderOrTrap(orderId);
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order was canceled before payment.");
+    };
     if (order.status != #AwaitingPayment) return #err("Order cannot be marked for refund.");
 
     let updated = {
@@ -457,6 +627,9 @@ shared (install) actor class LauncherBackend() {
 
     let order = getOrderOrTrap(orderId);
     if (caller != order.owner and caller != owner) return #err("Caller does not own this order.");
+    if (canceledOrders.contains(orderId)) {
+      return #err("Order was canceled before payment.");
+    };
     if (order.status == #Live) return #ok(order);
     if (order.status != #PaymentDetected and order.status != #Failed) {
       return #err("Order is not ready for deployment.");
@@ -524,7 +697,7 @@ shared (install) actor class LauncherBackend() {
     let cappedLimit = pageLimit(limit);
     var matched : Nat = 0;
     label scan for (order in orders.values()) {
-      if (order.owner == caller) {
+      if (order.owner == caller and not canceledOrders.contains(order.id)) {
         if (matched >= offset and results.size() < cappedLimit) results.add(order);
         matched += 1;
         if (results.size() >= cappedLimit) break scan;

@@ -17,6 +17,10 @@ import {
   createActor as createFactoryActor,
   type FactoryReadiness,
 } from "./bindings/launcher_factory";
+import {
+  appPreviewDocument,
+  type AppPreviewConfig,
+} from "./appPreview";
 import "./styles.css";
 
 type LauncherActor = ReturnType<typeof createActor>;
@@ -103,6 +107,15 @@ let relayerHealth: RelayerHealth | null = null;
 let notice = "";
 let paymentError = "";
 let busy = false;
+let draftConfig: AppPreviewConfig = {
+  name: "Open Horizon",
+  headline: "A better path from idea to impact.",
+  description:
+    "An open project page for the product, milestones, team, and the next chapter we are building together.",
+  accentColor: "#79f2c0",
+  primaryLink: "",
+  contact: "",
+};
 
 function createLauncherActor(
   identity?: Awaited<ReturnType<typeof authClient.getIdentity>>,
@@ -473,6 +486,30 @@ function timeline(order: DeploymentOrder): string {
   `;
 }
 
+function renderAppPreview(
+  config: AppPreviewConfig,
+  templateId: string,
+  label: string,
+  frameId: string,
+): string {
+  return `
+    <div class="app-preview-card">
+      <div class="app-preview-heading">
+        <span class="section-label">App preview</span>
+        <span>${html(label)}</span>
+      </div>
+      <iframe
+        id="${html(frameId)}"
+        class="app-preview-frame"
+        title="${html(label)}"
+        sandbox="allow-popups"
+        referrerpolicy="no-referrer"
+        srcdoc="${html(appPreviewDocument(config, templateId))}">
+      </iframe>
+    </div>
+  `;
+}
+
 function renderCurrentOrder(): string {
   if (!currentOrder) {
     return `
@@ -490,6 +527,15 @@ function renderCurrentOrder(): string {
   const liveAppUrl = appUrl(currentOrder);
   const isLive = status === "Live";
   const settlementAsset = currentOrder.settlementAsset;
+  const canCancel =
+    status === "AwaitingPayment" &&
+    !currentOrder.paymentTxHash &&
+    !currentOrder.settlementProof;
+  const hasPaymentQuote = Boolean(
+    currentOrder.paymentQuoteId ||
+      currentOrder.depositAddress ||
+      currentQuote,
+  );
 
   return `
     <article class="order-card">
@@ -500,6 +546,12 @@ function renderCurrentOrder(): string {
         </div>
         <span class="status status-${status.toLowerCase()}">${html(statusLabel(status))}</span>
       </div>
+      ${renderAppPreview(
+        currentOrder.config,
+        currentOrder.templateId,
+        "Saved order configuration",
+        "order-preview-frame",
+      )}
       ${timeline(currentOrder)}
       <div class="order-facts">
         <div><small>Plan price</small><strong>${money(currentOrder.expectedAmountUsdCents)} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</strong></div>
@@ -600,6 +652,22 @@ function renderCurrentOrder(): string {
       ${
         canDeploy
           ? `<button class="button deploy" id="deploy-button" type="button">${status === "Failed" ? "Retry deployment" : "Deploy app on ICP"}</button>`
+          : ""
+      }
+      ${
+        canCancel
+          ? `
+            <div class="cancel-order-panel">
+              <p>${
+                hasPaymentQuote
+                  ? currentQuote?.mock
+                    ? "The relayer will confirm that this simulated quote has no payment activity."
+                    : "For a real quote, cancellation is allowed only after the quote expires and 1Click still reports that no deposit was detected."
+                  : "This order has no payment quote and can be canceled immediately."
+              }</p>
+              <button class="button cancel wide" id="cancel-order-button" type="button">Cancel unpaid order</button>
+            </div>
+          `
           : ""
       }
       ${
@@ -863,15 +931,21 @@ function render(): void {
                 <span class="price-preview" id="price-preview">fixed ${initialBreakdown ? money(initialBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
               </div>
               <div class="field-row">
-                <label>App name<input name="name" required maxlength="80" value="Open Horizon" /></label>
-                <label>Accent color<input name="accentColor" required pattern="#[0-9a-fA-F]{6}" value="#79f2c0" /></label>
+                <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
+                <label>Accent color<input name="accentColor" required pattern="#[0-9a-fA-F]{6}" value="${html(draftConfig.accentColor)}" /></label>
               </div>
-              <label>Headline<input name="headline" required maxlength="140" value="A better path from idea to impact." /></label>
-              <label>Description<textarea name="description" required maxlength="1200">An open project page for the product, milestones, team, and the next chapter we are building together.</textarea></label>
+              <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
+              <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
               <div class="field-row">
-                <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." /></label>
-                <label>Contact<input name="contact" placeholder="hello@example.com" /></label>
+                <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
+                <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
               </div>
+              ${renderAppPreview(
+                draftConfig,
+                selectedTemplate,
+                "Updates as you type",
+                "draft-preview-frame",
+              )}
               <label>Funding duration
                 <div class="funding-options">
                   ${[1, 3, 6]
@@ -969,6 +1043,13 @@ function bindEvents(): void {
       void createOrder(event.currentTarget);
     }
   });
+  document
+    .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+      "#launch-form input:not([name='fundingMonths']), #launch-form textarea",
+    )
+    .forEach((field) => {
+      field.addEventListener("input", refreshDraftPreview);
+    });
 
   document.querySelectorAll<HTMLInputElement>('input[name="fundingMonths"]').forEach((input) => {
     input.addEventListener("change", () => updatePricingPreview(Number(input.value)));
@@ -989,6 +1070,9 @@ function bindEvents(): void {
   });
   document.querySelector("#deploy-button")?.addEventListener("click", () => {
     void deployCurrentOrder();
+  });
+  document.querySelector("#cancel-order-button")?.addEventListener("click", () => {
+    void cancelCurrentOrder();
   });
 
   document.querySelectorAll<HTMLElement>("[data-order]").forEach((row) => {
@@ -1052,6 +1136,28 @@ function updatePricingPreview(months: number): void {
     preview.textContent = `fixed ${money(breakdown.totalUsdCents)} ${publicConfig?.paymentDisplay.priceCurrency || "USD"}`;
   }
   if (details) details.innerHTML = renderPriceBreakdown(activeTemplate(), months);
+}
+
+function previewConfigFromForm(form: HTMLFormElement): AppPreviewConfig {
+  const data = new FormData(form);
+  return {
+    name: String(data.get("name") || ""),
+    headline: String(data.get("headline") || ""),
+    description: String(data.get("description") || ""),
+    accentColor: String(data.get("accentColor") || ""),
+    primaryLink: String(data.get("primaryLink") || ""),
+    contact: String(data.get("contact") || ""),
+  };
+}
+
+function refreshDraftPreview(): void {
+  const form = document.querySelector<HTMLFormElement>("#launch-form");
+  const frame = document.querySelector<HTMLIFrameElement>(
+    "#draft-preview-frame",
+  );
+  if (!form || !frame) return;
+  draftConfig = previewConfigFromForm(form);
+  frame.srcdoc = appPreviewDocument(draftConfig, selectedTemplate);
 }
 
 function updateRefundHelp(): void {
@@ -1192,17 +1298,11 @@ async function createOrder(form: HTMLFormElement): Promise<void> {
   await withBusy(async () => {
     if (!signedIn || !actor) throw new Error("Sign in before creating an order.");
     const data = new FormData(form);
+    draftConfig = previewConfigFromForm(form);
     const result = await actor.createDeploymentOrder({
       templateId: selectedTemplate,
       fundingMonths: BigInt(String(data.get("fundingMonths"))),
-      config: {
-        name: String(data.get("name") || ""),
-        headline: String(data.get("headline") || ""),
-        description: String(data.get("description") || ""),
-        accentColor: String(data.get("accentColor") || ""),
-        primaryLink: String(data.get("primaryLink") || ""),
-        contact: String(data.get("contact") || ""),
-      },
+      config: draftConfig,
     });
     currentOrder = unwrapResult(result);
     currentQuote = null;
@@ -1342,6 +1442,51 @@ async function deployCurrentOrder(): Promise<void> {
     currentOrder = unwrapResult(await actor.deployPaidOrder(currentOrder.id));
     await Promise.all([loadOrders(), loadFactoryReadiness()]);
     notice = "The factory installed your app canister.";
+  });
+}
+
+async function cancelCurrentOrder(): Promise<void> {
+  await withBusy(async () => {
+    if (!actor || !currentOrder) {
+      throw new Error("No deployment order selected.");
+    }
+
+    const order = currentOrder;
+    const confirmed = window.confirm(
+      `Cancel order #${order.id.toString()}? It will be removed from your dashboard and cannot be paid or deployed.`,
+    );
+    if (!confirmed) return;
+
+    if (order.paymentQuoteId || order.depositAddress) {
+      if (!order.depositAddress) {
+        throw new Error("This order's payment quote is incomplete.");
+      }
+      const authorization = unwrapText(
+        await actor.authorizeDeploymentCancellation(order.id),
+      );
+      const response = await fetch(`${RELAYER_URL}/api/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id.toString(),
+          depositAddress: order.depositAddress,
+          authorization,
+        }),
+      });
+      await readApiResponse<{ ok: boolean; status: string }>(
+        response,
+        "Could not cancel the quoted order.",
+      );
+    } else {
+      unwrapResult(await actor.cancelDeploymentOrder(order.id));
+    }
+
+    currentQuote = null;
+    paymentError = "";
+    await loadOrders();
+    currentOrder = orders[0] || null;
+    if (currentOrder) await restoreQuote(currentOrder);
+    notice = `Order #${order.id.toString()} canceled.`;
   });
 }
 

@@ -462,6 +462,9 @@ async function registerQuote(record, authorization) {
 }
 
 async function settleQuote(record, statusPayload) {
+  if (record.canceled) {
+    throw new Error("Canceled quotes cannot be settled.");
+  }
   if (record.settled) return;
 
   const amountOut = natural(
@@ -507,6 +510,9 @@ async function settleQuote(record, statusPayload) {
 }
 
 async function markRefund(record, reason) {
+  if (record.canceled) {
+    throw new Error("Canceled quotes cannot be marked for refund.");
+  }
   if (record.refundRecorded) return;
   await callBackend(
     "markRefundRequired",
@@ -515,6 +521,74 @@ async function markRefund(record, reason) {
   );
   record.refundRecorded = true;
   record.status = "REFUNDED";
+  saveQuotes();
+}
+
+async function refreshQuoteStatus(record) {
+  if (record.canceled) {
+    return {
+      status: "CANCELED",
+      depositAddress: record.depositAddress,
+      canceled: true,
+    };
+  }
+  if (record.mock) {
+    return {
+      status: record.status,
+      depositAddress: record.depositAddress,
+      settled: record.settled,
+    };
+  }
+
+  const query = new URLSearchParams({
+    depositAddress: record.depositAddress,
+  });
+  if (record.depositMemo) query.set("depositMemo", record.depositMemo);
+
+  const payload = await oneClickFetch(`/v0/status?${query.toString()}`, {
+    method: "GET",
+  });
+  record.status = payload.status;
+  record.lastStatus = payload;
+  saveQuotes();
+
+  if (payload.status === "SUCCESS") {
+    await settleQuote(record, payload);
+  } else if (payload.status === "REFUNDED") {
+    await markRefund(
+      record,
+      payload.swapDetails?.refundReason || "1Click refunded the deposit.",
+    );
+  }
+
+  return payload;
+}
+
+function cancellationBlockReason(record, status) {
+  if (status !== "PENDING_DEPOSIT") {
+    return `This order cannot be canceled because its payment status is ${status}.`;
+  }
+  if (record.mock) return "";
+
+  const deadline = Date.parse(record.deadline);
+  if (!Number.isFinite(deadline)) {
+    return "This quote is missing a valid deadline and cannot be canceled automatically.";
+  }
+  if (Date.now() < deadline) {
+    return `This payment quote remains active until ${new Date(deadline).toISOString()}. For safety, cancel it after the quote expires.`;
+  }
+  return "";
+}
+
+async function cancelQuote(record, authorization) {
+  await callBackend(
+    "cancelAuthorizedDeploymentOrder",
+    [BigInt(record.orderId), authorization, record.depositAddress],
+    `(${record.orderId}, ${candidText(authorization)}, ${candidText(record.depositAddress)})`,
+  );
+  record.canceled = true;
+  record.canceledAt = new Date().toISOString();
+  record.status = "CANCELED";
   saveQuotes();
 }
 
@@ -773,6 +847,7 @@ app.post("/api/deposit/submit", async (request, response) => {
     const txHash = text(request.body.txHash, 240);
     const record = quotes[depositAddress];
     if (!record) throw new Error("Unknown deposit address.");
+    if (record.canceled) throw new Error("This payment quote was canceled.");
     if (record.mock) throw new Error("Deposit submission is disabled in mock mode.");
 
     const payload = await oneClickFetch("/v0/deposit/submit", {
@@ -794,37 +869,67 @@ app.get("/api/status", async (request, response) => {
     const depositAddress = text(request.query.depositAddress, 240);
     const record = quotes[depositAddress];
     if (!record) throw new Error("Unknown deposit address.");
-
-    if (record.mock) {
-      return response.json({
-        status: record.status,
-        depositAddress,
-        settled: record.settled,
-      });
-    }
-
-    const query = new URLSearchParams({ depositAddress });
-    if (request.query.depositMemo) {
-      query.set("depositMemo", text(request.query.depositMemo, 120));
-    }
-    const payload = await oneClickFetch(`/v0/status?${query.toString()}`, {
-      method: "GET",
-    });
-    record.status = payload.status;
-    record.lastStatus = payload;
-    saveQuotes();
-
-    if (payload.status === "SUCCESS") {
-      await settleQuote(record, payload);
-    } else if (payload.status === "REFUNDED") {
-      await markRefund(record, payload.swapDetails?.refundReason || "1Click refunded the deposit.");
-    }
-
-    response.json(payload);
+    response.json(await refreshQuoteStatus(record));
   } catch (error) {
     response.status(400).json({
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+});
+
+app.post("/api/cancel", async (request, response) => {
+  try {
+    const orderId = natural(request.body.orderId, 9_999_999_999n).toString();
+    const depositAddress = text(request.body.depositAddress, 240);
+    const authorization = text(request.body.authorization, 240);
+    const record = quotes[depositAddress];
+    if (!record || record.orderId !== orderId) {
+      throw new RelayerError(
+        "The payment quote does not match this order.",
+        404,
+        "QUOTE_NOT_FOUND",
+      );
+    }
+    if (record.canceled) {
+      return response.json({ ok: true, status: "CANCELED" });
+    }
+    if (record.settled) {
+      throw new RelayerError(
+        "This order already has a successful payment.",
+        409,
+        "ORDER_CANCELLATION_BLOCKED",
+      );
+    }
+
+    const statusPayload = await refreshQuoteStatus(record);
+    const blockReason = cancellationBlockReason(record, statusPayload.status);
+    if (blockReason) {
+      throw new RelayerError(
+        blockReason,
+        409,
+        "ORDER_CANCELLATION_BLOCKED",
+        {
+          status: statusPayload.status,
+          deadline: record.deadline,
+        },
+      );
+    }
+
+    await cancelQuote(record, authorization);
+    response.json({ ok: true, status: "CANCELED" });
+  } catch (error) {
+    response
+      .status(error instanceof RelayerError ? error.status : 400)
+      .json({
+        error: error instanceof Error ? error.message : String(error),
+        code:
+          error instanceof RelayerError
+            ? error.code
+            : "ORDER_CANCELLATION_FAILED",
+        ...(error instanceof RelayerError && error.details
+          ? { details: error.details }
+          : {}),
+      });
   }
 });
 
@@ -837,6 +942,7 @@ app.post("/api/mock/settle", async (request, response) => {
     if (!record || !record.mock || record.orderId !== orderId) {
       throw new Error("Mock quote not found.");
     }
+    if (record.canceled) throw new Error("This payment quote was canceled.");
 
     await settleQuote(record, {
       swapDetails: {

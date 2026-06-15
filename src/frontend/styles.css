@@ -647,6 +647,38 @@ textarea {
   resize: vertical;
 }
 
+.app-preview-card {
+  margin-top: 24px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #080b0d;
+}
+
+.app-preview-heading {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+  padding: 0 16px;
+}
+
+.app-preview-heading > span:last-child {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.64rem;
+}
+
+.app-preview-frame {
+  width: 100%;
+  height: 420px;
+  display: block;
+  border: 0;
+  background: #090b0f;
+}
+
 .funding-options {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -940,6 +972,27 @@ textarea {
   margin-top: 24px;
   background: var(--orange);
   color: #1a0c05;
+}
+
+.cancel-order-panel {
+  margin-top: 24px;
+  border: 1px solid rgba(255, 157, 102, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 157, 102, 0.04);
+  padding: 18px;
+}
+
+.cancel-order-panel p {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.button.cancel {
+  border-color: rgba(255, 157, 102, 0.45);
+  background: transparent;
+  color: var(--orange);
 }
 
 .live-link {
@@ -1400,6 +1453,10 @@ footer a {
 
   .payment-receipt {
     flex-direction: column;
+  }
+
+  .app-preview-frame {
+    height: 340px;
   }
 
   .availability-banner,
