@@ -1,4 +1,17 @@
 module {
+  public type Link = {
+    labelText : Text;
+    url : Text;
+  };
+
+  public type PortfolioProject = {
+    title : Text;
+    description : Text;
+    url : Text;
+    imageUrl : Text;
+    tags : [Text];
+  };
+
   public type AppConfig = {
     name : Text;
     headline : Text;
@@ -6,6 +19,12 @@ module {
     accentColor : Text;
     primaryLink : Text;
     contact : Text;
+    about : ?Text;
+    heroImageUrl : ?Text;
+    resumeUrl : ?Text;
+    skills : ?[Text];
+    socialLinks : ?[Link];
+    projects : ?[PortfolioProject];
   };
 
   public type Template = {
@@ -153,6 +172,10 @@ module {
     owner : Principal;
     templateId : Text;
     config : AppConfig;
+  };
+
+  public type ChildTemplateInfo = {
+    templateId : Text;
   };
 
   public type PlatformStats = {

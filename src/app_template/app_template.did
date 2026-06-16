@@ -1,3 +1,16 @@
+type Link = record {
+  labelText : text;
+  url : text;
+};
+
+type PortfolioProject = record {
+  title : text;
+  description : text;
+  url : text;
+  imageUrl : text;
+  tags : vec text;
+};
+
 type AppConfig = record {
   name : text;
   headline : text;
@@ -5,12 +18,22 @@ type AppConfig = record {
   accentColor : text;
   primaryLink : text;
   contact : text;
+  about : opt text;
+  heroImageUrl : opt text;
+  resumeUrl : opt text;
+  skills : opt vec text;
+  socialLinks : opt vec Link;
+  projects : opt vec PortfolioProject;
 };
 
 type ChildInit = record {
   owner : principal;
   templateId : text;
   config : AppConfig;
+};
+
+type ChildTemplateInfo = record {
+  templateId : text;
 };
 
 type HeaderField = record { text; text };
@@ -42,6 +65,8 @@ type HttpResponse = record {
 
 service : (ChildInit) -> {
   getConfig : () -> (ChildInit) query;
+  getOwner : () -> (principal) query;
+  getTemplateInfo : () -> (ChildTemplateInfo) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   transferOwnership : (principal) -> ();
   updateConfig : (AppConfig) -> ();

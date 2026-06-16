@@ -29,6 +29,108 @@ module {
     true;
   };
 
+  func requireHttpsUrl(value : Text, fieldName : Text) : Result.Result<(), Text> {
+    if (value.size() == 0) return #ok(());
+    if (value.size() > 240) return #err(fieldName # " URL is too long.");
+    if (not value.startsWith(#text("https://"))) {
+      return #err(fieldName # " must use https://.");
+    };
+    #ok(());
+  };
+
+  func validateOptionalText(
+    value : ?Text,
+    maxLength : Nat,
+    fieldName : Text,
+  ) : Result.Result<(), Text> {
+    switch (value) {
+      case (null) #ok(());
+      case (?text) {
+        if (text.size() > maxLength) {
+          #err(fieldName # " is too long.")
+        } else {
+          #ok(())
+        };
+      };
+    };
+  };
+
+  func validateSkills(skills : ?[Text]) : Result.Result<(), Text> {
+    switch (skills) {
+      case (null) #ok(());
+      case (?items) {
+        if (items.size() > 12) return #err("Use 12 skills or fewer.");
+        for (skill in items.vals()) {
+          if (skill.size() == 0 or skill.size() > 40) {
+            return #err("Each skill must be between 1 and 40 characters.");
+          };
+        };
+        #ok(());
+      };
+    };
+  };
+
+  func validateLinks(links : ?[Types.Link]) : Result.Result<(), Text> {
+    switch (links) {
+      case (null) #ok(());
+      case (?items) {
+        if (items.size() > 6) return #err("Use 6 social links or fewer.");
+        for (link in items.vals()) {
+          if (link.labelText.size() == 0 or link.labelText.size() > 32) {
+            return #err("Each social link label must be between 1 and 32 characters.");
+          };
+          switch (requireHttpsUrl(link.url, "Social link")) {
+            case (#err(message)) return #err(message);
+            case (#ok(())) {};
+          };
+        };
+        #ok(());
+      };
+    };
+  };
+
+  func validateProject(project : Types.PortfolioProject) : Result.Result<(), Text> {
+    if (project.title.size() == 0 or project.title.size() > 80) {
+      return #err("Each project title must be between 1 and 80 characters.");
+    };
+    if (project.description.size() > 500) {
+      return #err("Each project description must be 500 characters or fewer.");
+    };
+    switch (requireHttpsUrl(project.url, "Project link")) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (requireHttpsUrl(project.imageUrl, "Project image")) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    if (project.tags.size() > 6) return #err("Use 6 tags or fewer per project.");
+    for (tag in project.tags.vals()) {
+      if (tag.size() == 0 or tag.size() > 32) {
+        return #err("Each project tag must be between 1 and 32 characters.");
+      };
+    };
+    #ok(());
+  };
+
+  func validateProjects(
+    projects : ?[Types.PortfolioProject]
+  ) : Result.Result<(), Text> {
+    switch (projects) {
+      case (null) #ok(());
+      case (?items) {
+        if (items.size() > 8) return #err("Use 8 projects or fewer.");
+        for (project in items.vals()) {
+          switch (validateProject(project)) {
+            case (#err(message)) return #err(message);
+            case (#ok(())) {};
+          };
+        };
+        #ok(());
+      };
+    };
+  };
+
   public func requireAuthenticated(caller : Principal) : Result.Result<(), Text> {
     if (caller.isAnonymous()) {
       #err("Sign in with Internet Identity first.")
@@ -66,6 +168,30 @@ module {
       not config.primaryLink.startsWith(#text("https://"))
     ) {
       return #err("Primary link must use https://.");
+    };
+    switch (validateOptionalText(config.about, 2_000, "About section")) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (requireHttpsUrl(switch (config.heroImageUrl) { case (?url) url; case (null) "" }, "Hero image")) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (requireHttpsUrl(switch (config.resumeUrl) { case (?url) url; case (null) "" }, "Resume")) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (validateSkills(config.skills)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (validateLinks(config.socialLinks)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (validateProjects(config.projects)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
     };
     #ok(());
   };

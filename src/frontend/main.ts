@@ -1,4 +1,6 @@
 import { AuthClient } from "@icp-sdk/auth/client";
+import { Actor, HttpAgent, type ActorSubclass } from "@icp-sdk/core/agent";
+import { IDL } from "@icp-sdk/core/candid";
 import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
 import {
@@ -20,11 +22,39 @@ import {
 import {
   appPreviewDocument,
   type AppPreviewConfig,
+  type AppPreviewLink,
+  type AppPreviewProject,
 } from "./appPreview";
 import "./styles.css";
 
 type LauncherActor = ReturnType<typeof createActor>;
 type FactoryActor = ReturnType<typeof createFactoryActor>;
+type CandidOpt<T> = [] | [T];
+type ChildAppConfig = {
+  name: string;
+  headline: string;
+  description: string;
+  accentColor: string;
+  primaryLink: string;
+  contact: string;
+  about: CandidOpt<string>;
+  heroImageUrl: CandidOpt<string>;
+  resumeUrl: CandidOpt<string>;
+  skills: CandidOpt<string[]>;
+  socialLinks: CandidOpt<AppPreviewLink[]>;
+  projects: CandidOpt<AppPreviewProject[]>;
+};
+type ChildInit = {
+  owner: Principal;
+  templateId: string;
+  config: ChildAppConfig;
+};
+type ChildAppService = {
+  getConfig: () => Promise<ChildInit>;
+  getOwner: () => Promise<Principal>;
+  updateConfig: (config: ChildAppConfig) => Promise<void>;
+};
+type ChildAppActor = ActorSubclass<ChildAppService>;
 
 type QuoteView = {
   mock: boolean;
@@ -94,7 +124,7 @@ let signedIn = false;
 let principal = "";
 let templates: Template[] = [];
 let orders: DeploymentOrder[] = [];
-let selectedTemplate = "grant";
+let selectedTemplate = "portfolio";
 let selectedFundingMonths = 3;
 let currentOrder: DeploymentOrder | null = null;
 let currentQuote: QuoteView | null = null;
@@ -109,13 +139,32 @@ let notice = "";
 let paymentError = "";
 let busy = false;
 let draftConfig: AppPreviewConfig = {
-  name: "Open Horizon",
-  headline: "A better path from idea to impact.",
+  name: "Open Horizon Studio",
+  headline: "Designing useful systems for ambitious teams.",
   description:
-    "An open project page for the product, milestones, team, and the next chapter we are building together.",
-  accentColor: "#79f2c0",
-  primaryLink: "",
-  contact: "",
+    "A portfolio for selected work, collaborations, and the practical craft behind each launch.",
+  accentColor: "#2fbf8f",
+  primaryLink: "https://example.com",
+  contact: "hello@example.com",
+  about:
+    "I work across product strategy, interface design, and resilient web systems. This portfolio is editable by its owner after deployment.",
+  heroImageUrl: "",
+  resumeUrl: "https://example.com/resume.pdf",
+  skills: ["Product strategy", "Frontend systems", "ICP canisters"],
+  socialLinks: [
+    { labelText: "GitHub", url: "https://github.com/example" },
+    { labelText: "LinkedIn", url: "https://linkedin.com" },
+  ],
+  projects: [
+    {
+      title: "Launch Console",
+      description:
+        "A deployment workflow that turns a signed intent into a live Internet Computer app.",
+      url: "https://example.com/project",
+      imageUrl: "",
+      tags: ["ICP", "NEAR", "TypeScript"],
+    },
+  ],
 };
 
 function createLauncherActor(
@@ -151,6 +200,56 @@ function createLauncherFactoryActor(
       host: window.location.origin,
       rootKey: canisterEnv?.IC_ROOT_KEY,
     },
+  });
+}
+
+const childAppIdlFactory: IDL.InterfaceFactory = ({ IDL: idl }) => {
+  const PortfolioProject = idl.Record({
+    url: idl.Text,
+    title: idl.Text,
+    tags: idl.Vec(idl.Text),
+    description: idl.Text,
+    imageUrl: idl.Text,
+  });
+  const Link = idl.Record({ url: idl.Text, labelText: idl.Text });
+  const AppConfig = idl.Record({
+    heroImageUrl: idl.Opt(idl.Text),
+    primaryLink: idl.Text,
+    contact: idl.Text,
+    about: idl.Opt(idl.Text),
+    projects: idl.Opt(idl.Vec(PortfolioProject)),
+    socialLinks: idl.Opt(idl.Vec(Link)),
+    headline: idl.Text,
+    name: idl.Text,
+    description: idl.Text,
+    accentColor: idl.Text,
+    skills: idl.Opt(idl.Vec(idl.Text)),
+    resumeUrl: idl.Opt(idl.Text),
+  });
+  const ChildInit = idl.Record({
+    owner: idl.Principal,
+    templateId: idl.Text,
+    config: AppConfig,
+  });
+  return idl.Service({
+    getConfig: idl.Func([], [ChildInit], ["query"]),
+    getOwner: idl.Func([], [idl.Principal], ["query"]),
+    updateConfig: idl.Func([AppConfig], [], []),
+  });
+};
+
+function createChildAppActor(
+  canisterId: Principal,
+  identity: Awaited<ReturnType<typeof authClient.getIdentity>>,
+): ChildAppActor {
+  const agent = HttpAgent.createSync({
+    identity,
+    host: window.location.origin,
+    rootKey: canisterEnv?.IC_ROOT_KEY,
+  });
+  return Actor.createActor<ChildAppService>(childAppIdlFactory, {
+    agent,
+    canisterId: canisterId.toText(),
   });
 }
 
@@ -199,6 +298,133 @@ function html(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function splitList(value: string, limit: number): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function linksFromText(value: string): AppPreviewLink[] {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 6)
+    .map((line) => {
+      const [labelText = "", url = ""] = line.split("|").map((part) => part.trim());
+      return { labelText, url };
+    })
+    .filter((link) => link.labelText && link.url);
+}
+
+function linksToText(links: AppPreviewLink[]): string {
+  return links.map((link) => `${link.labelText} | ${link.url}`).join("\n");
+}
+
+function projectsFromText(value: string): AppPreviewProject[] {
+  return value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 8)
+    .map((line) => {
+      const [
+        title = "",
+        description = "",
+        url = "",
+        tags = "",
+        imageUrl = "",
+      ] = line.split("|").map((part) => part.trim());
+      return {
+        title,
+        description,
+        url,
+        imageUrl,
+        tags: splitList(tags, 6),
+      };
+    })
+    .filter((project) => project.title);
+}
+
+function projectsToText(projects: AppPreviewProject[]): string {
+  return projects
+    .map((project) =>
+      [
+        project.title,
+        project.description,
+        project.url,
+        project.tags.join(", "),
+        project.imageUrl,
+      ].join(" | "),
+    )
+    .join("\n");
+}
+
+type CanisterAppConfig = Omit<
+  AppPreviewConfig,
+  | "about"
+  | "heroImageUrl"
+  | "resumeUrl"
+  | "skills"
+  | "socialLinks"
+  | "projects"
+> & {
+  about?: string;
+  heroImageUrl?: string;
+  resumeUrl?: string;
+  skills?: string[];
+  socialLinks?: AppPreviewLink[];
+  projects?: AppPreviewProject[];
+};
+
+function toCanisterConfig(config: AppPreviewConfig): CanisterAppConfig {
+  return {
+    ...config,
+    about: config.about.trim() || undefined,
+    heroImageUrl: config.heroImageUrl.trim() || undefined,
+    resumeUrl: config.resumeUrl.trim() || undefined,
+    skills: config.skills.length > 0 ? config.skills : undefined,
+    socialLinks: config.socialLinks.length > 0 ? config.socialLinks : undefined,
+    projects: config.projects.length > 0 ? config.projects : undefined,
+  };
+}
+
+function candidOpt<T>(value: T | undefined): CandidOpt<T> {
+  return value === undefined ? [] : [value];
+}
+
+function toChildAppConfig(config: AppPreviewConfig): ChildAppConfig {
+  const normalized = toCanisterConfig(config);
+  return {
+    name: normalized.name,
+    headline: normalized.headline,
+    description: normalized.description,
+    accentColor: normalized.accentColor,
+    primaryLink: normalized.primaryLink,
+    contact: normalized.contact,
+    about: candidOpt(normalized.about),
+    heroImageUrl: candidOpt(normalized.heroImageUrl),
+    resumeUrl: candidOpt(normalized.resumeUrl),
+    skills: candidOpt(normalized.skills),
+    socialLinks: candidOpt(normalized.socialLinks),
+    projects: candidOpt(normalized.projects),
+  };
+}
+
+function fromCanisterConfig(config: CanisterAppConfig): AppPreviewConfig {
+  return {
+    ...config,
+    about: config.about || "",
+    heroImageUrl: config.heroImageUrl || "",
+    resumeUrl: config.resumeUrl || "",
+    skills: config.skills || [],
+    socialLinks: config.socialLinks || [],
+    projects: config.projects || [],
+  };
 }
 
 function unwrapResult(result: ResultOrder): DeploymentOrder {
@@ -513,6 +739,35 @@ function renderAppPreview(
   `;
 }
 
+function renderLivePortfolioEditor(config: AppPreviewConfig): string {
+  return `
+    <form class="live-config-form" id="live-config-form">
+      <div class="form-heading">
+        <div>
+          <span class="section-label">Portfolio admin</span>
+          <h4>Edit live portfolio</h4>
+        </div>
+        <button class="button secondary" type="submit">Save live app</button>
+      </div>
+      <label>Name<input name="name" required maxlength="80" value="${html(config.name)}" /></label>
+      <label>Headline<input name="headline" required maxlength="140" value="${html(config.headline)}" /></label>
+      <label>Description<textarea name="description" required maxlength="1200">${html(config.description)}</textarea></label>
+      <label>About<textarea name="about" maxlength="2000">${html(config.about)}</textarea></label>
+      <div class="field-row">
+        <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(config.primaryLink)}" /></label>
+        <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(config.contact)}" /></label>
+      </div>
+      <div class="field-row">
+        <label>Hero image<input name="heroImageUrl" type="url" placeholder="https://..." value="${html(config.heroImageUrl)}" /></label>
+        <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(config.resumeUrl)}" /></label>
+      </div>
+      <label>Skills<textarea name="skills" maxlength="500">${html(config.skills.join(", "))}</textarea></label>
+      <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(config.socialLinks))}</textarea></label>
+      <label>Projects<textarea name="projects" maxlength="3000">${html(projectsToText(config.projects))}</textarea></label>
+    </form>
+  `;
+}
+
 function renderCurrentOrder(): string {
   if (!currentOrder) {
     return `
@@ -529,6 +784,7 @@ function renderCurrentOrder(): string {
   const canDeploy = status === "PaymentDetected" || status === "Failed";
   const liveAppUrl = appUrl(currentOrder);
   const isLive = status === "Live";
+  const savedConfig = fromCanisterConfig(currentOrder.config as CanisterAppConfig);
   const settlementAsset = currentOrder.settlementAsset;
   const canCancel =
     status === "AwaitingPayment" &&
@@ -550,7 +806,7 @@ function renderCurrentOrder(): string {
         <span class="status status-${status.toLowerCase()}">${html(statusLabel(status))}</span>
       </div>
       ${renderAppPreview(
-        currentOrder.config,
+        savedConfig,
         currentOrder.templateId,
         "Saved order configuration",
         "order-preview-frame",
@@ -678,6 +934,7 @@ function renderCurrentOrder(): string {
           ? `<a class="live-link" href="${html(liveAppUrl)}" target="_blank" rel="noreferrer">Open live ICP app <span>^</span></a>`
           : ""
       }
+      ${isLive && currentOrder.createdCanisterId ? renderLivePortfolioEditor(savedConfig) : ""}
       ${currentOrder.error ? `<p class="error-message">${html(currentOrder.error)}</p>` : ""}
     </article>
   `;
@@ -939,10 +1196,18 @@ function render(): void {
               </div>
               <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
               <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
+              <label>About<textarea name="about" maxlength="2000">${html(draftConfig.about)}</textarea></label>
               <div class="field-row">
                 <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
                 <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
               </div>
+              <div class="field-row">
+                <label>Hero image<input name="heroImageUrl" type="url" placeholder="https://..." value="${html(draftConfig.heroImageUrl)}" /></label>
+                <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
+              </div>
+              <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
+              <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
+              <label>Projects<textarea name="projects" maxlength="3000">${html(projectsToText(draftConfig.projects))}</textarea></label>
               ${renderAppPreview(
                 draftConfig,
                 selectedTemplate,
@@ -1077,6 +1342,19 @@ function bindEvents(): void {
   document.querySelector("#cancel-order-button")?.addEventListener("click", () => {
     void cancelCurrentOrder();
   });
+  document.querySelector<HTMLFormElement>("#live-config-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (event.currentTarget instanceof HTMLFormElement) {
+      void saveLivePortfolioConfig(event.currentTarget);
+    }
+  });
+  document
+    .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+      "#live-config-form input, #live-config-form textarea",
+    )
+    .forEach((field) => {
+      field.addEventListener("input", refreshLivePreview);
+    });
 
   document.querySelectorAll<HTMLElement>("[data-order]").forEach((row) => {
     row.addEventListener("click", () => {
@@ -1150,6 +1428,12 @@ function previewConfigFromForm(form: HTMLFormElement): AppPreviewConfig {
     accentColor: String(data.get("accentColor") || ""),
     primaryLink: String(data.get("primaryLink") || ""),
     contact: String(data.get("contact") || ""),
+    about: String(data.get("about") || ""),
+    heroImageUrl: String(data.get("heroImageUrl") || ""),
+    resumeUrl: String(data.get("resumeUrl") || ""),
+    skills: splitList(String(data.get("skills") || ""), 12),
+    socialLinks: linksFromText(String(data.get("socialLinks") || "")),
+    projects: projectsFromText(String(data.get("projects") || "")),
   };
 }
 
@@ -1161,6 +1445,18 @@ function refreshDraftPreview(): void {
   if (!form || !frame) return;
   draftConfig = previewConfigFromForm(form);
   frame.srcdoc = appPreviewDocument(draftConfig, selectedTemplate);
+}
+
+function refreshLivePreview(): void {
+  const form = document.querySelector<HTMLFormElement>("#live-config-form");
+  const frame = document.querySelector<HTMLIFrameElement>(
+    "#order-preview-frame",
+  );
+  if (!form || !frame || !currentOrder) return;
+  frame.srcdoc = appPreviewDocument(
+    previewConfigFromForm(form),
+    currentOrder.templateId,
+  );
 }
 
 function updateRefundHelp(): void {
@@ -1305,7 +1601,7 @@ async function createOrder(form: HTMLFormElement): Promise<void> {
     const result = await actor.createDeploymentOrder({
       templateId: selectedTemplate,
       fundingMonths: BigInt(String(data.get("fundingMonths"))),
-      config: draftConfig,
+      config: toCanisterConfig(draftConfig),
     });
     currentOrder = unwrapResult(result);
     currentQuote = null;
@@ -1445,6 +1741,38 @@ async function deployCurrentOrder(): Promise<void> {
     currentOrder = unwrapResult(await actor.deployPaidOrder(currentOrder.id));
     await Promise.all([loadOrders(), loadFactoryReadiness()]);
     notice = "The factory installed your app canister.";
+  });
+}
+
+async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
+  await withBusy(async () => {
+    if (!signedIn || !actor) {
+      throw new Error("Sign in with Internet Identity before editing a live app.");
+    }
+    if (!currentOrder?.createdCanisterId) {
+      throw new Error("This deployment does not have a live app canister yet.");
+    }
+
+    const nextConfig = previewConfigFromForm(form);
+    const identity = await authClient.getIdentity();
+    const childActor = createChildAppActor(
+      currentOrder.createdCanisterId,
+      identity,
+    );
+    const childOwner = await childActor.getOwner();
+    if (childOwner.toText() !== principal) {
+      throw new Error("Your Internet Identity principal is not the owner of this app.");
+    }
+
+    await childActor.updateConfig(toChildAppConfig(nextConfig));
+    currentOrder = unwrapResult(
+      await actor.updateDeploymentOrderConfig(
+        currentOrder.id,
+        toCanisterConfig(nextConfig),
+      ),
+    );
+    await loadOrders();
+    notice = "Live portfolio updated.";
   });
 }
 

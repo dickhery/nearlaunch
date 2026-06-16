@@ -42,10 +42,10 @@ shared (install) actor class LauncherBackend() {
       "portfolio",
       {
         id = "portfolio";
-        name = "Portfolio";
-        description = "A focused personal site for work, links, and contact details.";
+        name = "Portfolio Plus";
+        description = "A multi-section portfolio with skills, socials, project cards, resume, and owner-managed content.";
         category = "Personal";
-        basePriceUsdCents = 400;
+        basePriceUsdCents = 700;
         active = true;
       },
     );
@@ -684,6 +684,35 @@ shared (install) actor class LauncherBackend() {
         #err(failure.message);
       };
     };
+  };
+
+  public shared ({ caller }) func updateDeploymentOrderConfig(
+    orderId : Nat,
+    config : Types.AppConfig,
+  ) : async Result.Result<Types.DeploymentOrder, Text> {
+    switch (Validation.requireAuthenticated(caller)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (Validation.appConfig(config)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+
+    let order = getOrderOrTrap(orderId);
+    if (caller != order.owner) return #err("Caller does not own this order.");
+    if (canceledOrders.contains(orderId)) return #err("Order was canceled.");
+    if (order.status != #Live) {
+      return #err("Only live apps can be edited after deployment.");
+    };
+
+    let updated = {
+      order with
+      config;
+      error = null;
+    };
+    orders.add(orderId, updated);
+    #ok(updated);
   };
 
   public query func getDeploymentOrder(orderId : Nat) : async ?Types.DeploymentOrder {

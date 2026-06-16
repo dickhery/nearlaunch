@@ -1,3 +1,16 @@
+export type AppPreviewLink = {
+  labelText: string;
+  url: string;
+};
+
+export type AppPreviewProject = {
+  title: string;
+  description: string;
+  url: string;
+  imageUrl: string;
+  tags: string[];
+};
+
 export type AppPreviewConfig = {
   name: string;
   headline: string;
@@ -5,6 +18,12 @@ export type AppPreviewConfig = {
   accentColor: string;
   primaryLink: string;
   contact: string;
+  about: string;
+  heroImageUrl: string;
+  resumeUrl: string;
+  skills: string[];
+  socialLinks: AppPreviewLink[];
+  projects: AppPreviewProject[];
 };
 
 function escapeHtml(value: string): string {
@@ -38,11 +57,64 @@ function safeHttpsUrl(value: string): string {
   }
 }
 
+function renderSkills(skills: string[]): string {
+  const items = skills
+    .filter(Boolean)
+    .map((skill) => `<li>${escapeHtml(skill)}</li>`)
+    .join("");
+  return items ? `<ul class="skill-list">${items}</ul>` : "";
+}
+
+function renderSocialLinks(links: AppPreviewLink[]): string {
+  const items = links
+    .filter((link) => link.labelText && safeHttpsUrl(link.url))
+    .map(
+      (link) =>
+        `<a href="${escapeHtml(safeHttpsUrl(link.url))}" target="_blank" rel="noreferrer">${escapeHtml(link.labelText)}</a>`,
+    )
+    .join("");
+  return items
+    ? `<nav class="social-links" aria-label="Portfolio links">${items}</nav>`
+    : "";
+}
+
+function renderTags(tags: string[]): string {
+  const items = tags
+    .filter(Boolean)
+    .map((tag) => `<span>${escapeHtml(tag)}</span>`)
+    .join("");
+  return items ? `<div class="project-tags">${items}</div>` : "";
+}
+
+function renderProject(project: AppPreviewProject): string {
+  const imageUrl = safeHttpsUrl(project.imageUrl);
+  const projectUrl = safeHttpsUrl(project.url);
+  const imageMarkup = imageUrl
+    ? `<img src="${escapeHtml(imageUrl)}" alt="" loading="lazy">`
+    : `<div class="project-placeholder" aria-hidden="true"></div>`;
+  const actionMarkup = projectUrl
+    ? `<a class="project-link" href="${escapeHtml(projectUrl)}" target="_blank" rel="noreferrer">Open project</a>`
+    : "";
+
+  return `<article class="project-card">${imageMarkup}<div><h3>${escapeHtml(
+    project.title,
+  )}</h3><p>${escapeHtml(project.description)}</p>${renderTags(
+    project.tags,
+  )}${actionMarkup}</div></article>`;
+}
+
+function renderProjects(projects: AppPreviewProject[]): string {
+  const items = projects.filter((project) => project.title).map(renderProject).join("");
+  return items
+    ? `<section class="section"><div class="section-heading"><span>Selected work</span><h2>Projects</h2></div><div class="project-grid">${items}</div></section>`
+    : "";
+}
+
 export function appPreviewDocument(
   config: AppPreviewConfig,
   templateId: string,
 ): string {
-  const safeName = escapeHtml(config.name || "Untitled app");
+  const safeName = escapeHtml(config.name || "Untitled portfolio");
   const safeHeadline = escapeHtml(
     config.headline || "Your headline will appear here.",
   );
@@ -51,30 +123,53 @@ export function appPreviewDocument(
   );
   const safeAccent = /^#[0-9a-fA-F]{6}$/.test(config.accentColor)
     ? config.accentColor
-    : "#79f2c0";
+    : "#2fbf8f";
   const safeContact = escapeHtml(config.contact);
-  const safeLink = escapeHtml(safeHttpsUrl(config.primaryLink));
-  const linkMarkup = safeLink
-    ? `<a class="primary" href="${safeLink}" target="_blank" rel="noreferrer">Explore the project</a>`
+  const about = escapeHtml(config.about || config.description);
+  const primaryLink = safeHttpsUrl(config.primaryLink);
+  const resumeUrl = safeHttpsUrl(config.resumeUrl);
+  const heroImageUrl = safeHttpsUrl(config.heroImageUrl);
+  const linkMarkup = primaryLink
+    ? `<a class="primary" href="${escapeHtml(primaryLink)}" target="_blank" rel="noreferrer">Explore the work</a>`
+    : "";
+  const resumeMarkup = resumeUrl
+    ? `<a class="secondary" href="${escapeHtml(resumeUrl)}" target="_blank" rel="noreferrer">Resume</a>`
     : "";
   const contactMarkup = safeContact
     ? `<span>${safeContact}</span>`
-    : "<span>Built with chain abstraction</span>";
+    : "<span>Built on the Internet Computer</span>";
+  const heroMediaMarkup = heroImageUrl
+    ? `<figure class="hero-media"><img src="${escapeHtml(heroImageUrl)}" alt="" loading="eager"></figure>`
+    : `<figure class="hero-media empty"><span>ICP</span><strong>Portfolio</strong></figure>`;
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="description" content="${safeDescription}">
 <title>${safeName}</title><style>
-:root{color-scheme:dark;--accent:${safeAccent};font-family:Inter,ui-sans-serif,system-ui,sans-serif}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#090b0f;color:#f4f6f8;display:grid;place-items:center;padding:28px}
-body:before{content:'';position:fixed;inset:0;background:radial-gradient(circle at 15% 15%,color-mix(in srgb,var(--accent) 24%,transparent),transparent 34%),radial-gradient(circle at 90% 80%,#173647,transparent 36%);pointer-events:none}
-main{position:relative;width:min(980px,100%);padding:clamp(32px,7vw,84px);border:1px solid #ffffff1a;border-radius:32px;background:#11141acc;box-shadow:0 35px 100px #0009;backdrop-filter:blur(18px)}
-.eyebrow{color:var(--accent);font-size:.78rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase}
-h1{max-width:820px;margin:24px 0;font-size:clamp(3rem,9vw,7.2rem);line-height:.92;letter-spacing:-.065em}
-p{max-width:680px;margin:0;color:#aeb7c2;font-size:clamp(1.05rem,2vw,1.35rem);line-height:1.7}
-.actions{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:42px}.primary{display:inline-flex;padding:15px 20px;border-radius:999px;background:var(--accent);color:#081014;text-decoration:none;font-weight:800}
-.meta{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-top:70px;padding-top:22px;border-top:1px solid #ffffff14;color:#7f8a96;font-size:.9rem}
-</style></head><body><main><div class="eyebrow">${escapeHtml(templateEyebrow(templateId))}</div>
-<h1>${safeHeadline}</h1><p>${safeDescription}</p><div class="actions">${linkMarkup}</div>
-<div class="meta"><strong>${safeName}</strong>${contactMarkup}</div></main></body></html>`;
+:root{color-scheme:light;--accent:${safeAccent};font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#f7f8fb;color:#171b22}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#f7f8fb;color:#171b22}
+a{color:inherit}main{width:min(1120px,100%);margin:0 auto;padding:28px}
+.hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(260px,.9fr);gap:28px;align-items:center;min-height:82vh;padding:42px 0;border-bottom:1px solid #dfe4ea}
+.eyebrow,.section-heading span{color:var(--accent);font-size:.78rem;font-weight:800;text-transform:uppercase}
+h1{max-width:780px;margin:18px 0;font-size:clamp(2.6rem,8vw,6.4rem);line-height:.96;letter-spacing:0}
+p{color:#516070;line-height:1.7}.lede{max-width:680px;font-size:clamp(1.05rem,2vw,1.28rem)}
+.actions,.social-links{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.actions{margin-top:32px}
+.primary,.secondary,.social-links a,.project-link{display:inline-flex;align-items:center;min-height:42px;padding:11px 14px;border:1px solid #171b22;text-decoration:none;font-weight:800;border-radius:8px}
+.primary{background:var(--accent);color:#071016;border-color:var(--accent)}.secondary,.social-links a{background:#fff}
+.hero-media{margin:0;min-height:380px;border:1px solid #dfe4ea;border-radius:8px;overflow:hidden;background:#ffffff;display:grid;place-items:center}
+.hero-media img{width:100%;height:100%;object-fit:cover}.hero-media.empty span{color:var(--accent);font-weight:900}.hero-media.empty strong{font-size:2rem}
+.section{padding:52px 0;border-bottom:1px solid #dfe4ea}.section-heading{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:22px}.section-heading h2{margin:0;font-size:2rem}
+.about-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,.7fr);gap:28px}.about-copy{font-size:1.1rem}.skill-list{display:flex;flex-wrap:wrap;gap:10px;padding:0;margin:0;list-style:none}.skill-list li,.project-tags span{border:1px solid #d5dbe3;background:#fff;border-radius:8px;padding:8px 10px;font-weight:700}
+.project-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}.project-card{background:#fff;border:1px solid #dfe4ea;border-radius:8px;overflow:hidden}.project-card img,.project-placeholder{width:100%;aspect-ratio:16/10;object-fit:cover;background:linear-gradient(135deg,#171b22,#4a6474)}.project-card div{padding:18px}.project-card h3{margin:0 0 8px;font-size:1.2rem}.project-tags{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}.project-tags span{font-size:.78rem;padding:5px 8px}
+.footer{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap;padding:28px 0;color:#6d7885}
+@media(max-width:760px){main{padding:20px}.hero,.about-grid{grid-template-columns:1fr}.hero{min-height:auto}.hero-media{min-height:260px}}
+</style></head><body><main><section class="hero"><div><div class="eyebrow">${escapeHtml(
+    templateEyebrow(templateId),
+  )}</div>
+<h1>${safeHeadline}</h1><p class="lede">${safeDescription}</p><div class="actions">${linkMarkup}${resumeMarkup}</div></div>${heroMediaMarkup}</section>
+<section class="section"><div class="section-heading"><span>About</span><h2>${safeName}</h2></div><div class="about-grid"><p class="about-copy">${about}</p><div>${renderSkills(
+    config.skills,
+  )}${renderSocialLinks(config.socialLinks)}</div></div></section>
+${renderProjects(config.projects)}
+<div class="footer"><strong>${safeName}</strong>${contactMarkup}<span>Owner-managed ICP portfolio</span></div></main></body></html>`;
 }

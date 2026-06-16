@@ -1,3 +1,16 @@
+type Link = record {
+  labelText : text;
+  url : text;
+};
+
+type PortfolioProject = record {
+  title : text;
+  description : text;
+  url : text;
+  imageUrl : text;
+  tags : vec text;
+};
+
 type AppConfig = record {
   name : text;
   headline : text;
@@ -5,6 +18,12 @@ type AppConfig = record {
   accentColor : text;
   primaryLink : text;
   contact : text;
+  about : opt text;
+  heroImageUrl : opt text;
+  resumeUrl : opt text;
+  skills : opt vec text;
+  socialLinks : opt vec Link;
+  projects : opt vec PortfolioProject;
 };
 
 type Template = record {
@@ -145,5 +164,6 @@ service : () -> {
   setPricingConfig : (PricingConfig) -> (ResultUnit);
   setSettlementConfig : (SettlementConfig) -> (ResultUnit);
   setSettlementRelayer : (principal) -> (ResultUnit);
+  updateDeploymentOrderConfig : (nat, AppConfig) -> (ResultOrder);
   upsertTemplate : (Template) -> (ResultUnit);
 }
