@@ -13,8 +13,10 @@ import Text "mo:core/Text";
 import Time "mo:core/Time";
 import Pricing "lib/Pricing";
 import Validation "lib/Validation";
+import UpgradeMigration "UpgradeMigration";
 import Types "../shared/Types";
 
+(with migration = UpgradeMigration.run)
 shared (install) actor class LauncherBackend() {
   let owner = do {
     if (install.caller.isAnonymous()) {
