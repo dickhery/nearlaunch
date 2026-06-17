@@ -1,6 +1,4 @@
 import { AuthClient } from "@icp-sdk/auth/client";
-import { Actor, HttpAgent, type ActorSubclass } from "@icp-sdk/core/agent";
-import { IDL } from "@icp-sdk/core/candid";
 import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
 import { Principal } from "@icp-sdk/core/principal";
 import {
@@ -29,32 +27,6 @@ import "./styles.css";
 
 type LauncherActor = ReturnType<typeof createActor>;
 type FactoryActor = ReturnType<typeof createFactoryActor>;
-type CandidOpt<T> = [] | [T];
-type ChildAppConfig = {
-  name: string;
-  headline: string;
-  description: string;
-  accentColor: string;
-  primaryLink: string;
-  contact: string;
-  about: CandidOpt<string>;
-  heroImageUrl: CandidOpt<string>;
-  resumeUrl: CandidOpt<string>;
-  skills: CandidOpt<string[]>;
-  socialLinks: CandidOpt<AppPreviewLink[]>;
-  projects: CandidOpt<AppPreviewProject[]>;
-};
-type ChildInit = {
-  owner: Principal;
-  templateId: string;
-  config: ChildAppConfig;
-};
-type ChildAppService = {
-  getConfig: () => Promise<ChildInit>;
-  getOwner: () => Promise<Principal>;
-  updateConfig: (config: ChildAppConfig) => Promise<void>;
-};
-type ChildAppActor = ActorSubclass<ChildAppService>;
 
 type QuoteView = {
   mock: boolean;
@@ -113,6 +85,10 @@ const canisterEnv = safeGetCanisterEnv();
 const backendCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_backend"];
 const factoryCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_factory"];
 const MIN_CHILD_CYCLES = 1_000_000_000_000n;
+const MAX_INLINE_IMAGE_LENGTH = 450_000;
+const MAX_IMAGE_SOURCE_BYTES = 8_000_000;
+const MAX_IMAGE_WIDTH = 1600;
+const MAX_IMAGE_HEIGHT = 1000;
 
 const authClient = new AuthClient({
   identityProvider: "https://id.ai/authorize",
@@ -138,6 +114,7 @@ let relayerHealth: RelayerHealth | null = null;
 let notice = "";
 let paymentError = "";
 let busy = false;
+let busyMessage = "";
 let draftConfig: AppPreviewConfig = {
   name: "Open Horizon Studio",
   headline: "Designing useful systems for ambitious teams.",
@@ -203,56 +180,6 @@ function createLauncherFactoryActor(
   });
 }
 
-const childAppIdlFactory: IDL.InterfaceFactory = ({ IDL: idl }) => {
-  const PortfolioProject = idl.Record({
-    url: idl.Text,
-    title: idl.Text,
-    tags: idl.Vec(idl.Text),
-    description: idl.Text,
-    imageUrl: idl.Text,
-  });
-  const Link = idl.Record({ url: idl.Text, labelText: idl.Text });
-  const AppConfig = idl.Record({
-    heroImageUrl: idl.Opt(idl.Text),
-    primaryLink: idl.Text,
-    contact: idl.Text,
-    about: idl.Opt(idl.Text),
-    projects: idl.Opt(idl.Vec(PortfolioProject)),
-    socialLinks: idl.Opt(idl.Vec(Link)),
-    headline: idl.Text,
-    name: idl.Text,
-    description: idl.Text,
-    accentColor: idl.Text,
-    skills: idl.Opt(idl.Vec(idl.Text)),
-    resumeUrl: idl.Opt(idl.Text),
-  });
-  const ChildInit = idl.Record({
-    owner: idl.Principal,
-    templateId: idl.Text,
-    config: AppConfig,
-  });
-  return idl.Service({
-    getConfig: idl.Func([], [ChildInit], ["query"]),
-    getOwner: idl.Func([], [idl.Principal], ["query"]),
-    updateConfig: idl.Func([AppConfig], [], []),
-  });
-};
-
-function createChildAppActor(
-  canisterId: Principal,
-  identity: Awaited<ReturnType<typeof authClient.getIdentity>>,
-): ChildAppActor {
-  const agent = HttpAgent.createSync({
-    identity,
-    host: window.location.origin,
-    rootKey: canisterEnv?.IC_ROOT_KEY,
-  });
-  return Actor.createActor<ChildAppService>(childAppIdlFactory, {
-    agent,
-    canisterId: canisterId.toText(),
-  });
-}
-
 function money(cents: bigint): string {
   return `$${(Number(cents) / 100).toFixed(2)}`;
 }
@@ -306,6 +233,57 @@ function splitList(value: string, limit: number): string[] {
     .map((item) => item.trim())
     .filter(Boolean)
     .slice(0, limit);
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not read that image file."));
+    };
+    image.src = url;
+  });
+}
+
+async function imageFileToDataUrl(file: File): Promise<string> {
+  if (!/^image\/(png|jpe?g|webp|gif)$/i.test(file.type)) {
+    throw new Error("Upload a PNG, JPEG, WebP, or GIF image.");
+  }
+  if (file.size > MAX_IMAGE_SOURCE_BYTES) {
+    throw new Error("Choose an image under 8 MB.");
+  }
+
+  const image = await loadImage(file);
+  const scale = Math.min(
+    1,
+    MAX_IMAGE_WIDTH / image.naturalWidth,
+    MAX_IMAGE_HEIGHT / image.naturalHeight,
+  );
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Image processing is unavailable in this browser.");
+  context.drawImage(image, 0, 0, width, height);
+
+  let quality = 0.86;
+  let dataUrl = canvas.toDataURL("image/jpeg", quality);
+  while (dataUrl.length > MAX_INLINE_IMAGE_LENGTH && quality > 0.5) {
+    quality -= 0.08;
+    dataUrl = canvas.toDataURL("image/jpeg", quality);
+  }
+  if (dataUrl.length > MAX_INLINE_IMAGE_LENGTH) {
+    throw new Error("That image is still too large after resizing. Try a smaller or less detailed image.");
+  }
+  return dataUrl;
 }
 
 function linksFromText(value: string): AppPreviewLink[] {
@@ -390,28 +368,6 @@ function toCanisterConfig(config: AppPreviewConfig): CanisterAppConfig {
     skills: config.skills.length > 0 ? config.skills : undefined,
     socialLinks: config.socialLinks.length > 0 ? config.socialLinks : undefined,
     projects: config.projects.length > 0 ? config.projects : undefined,
-  };
-}
-
-function candidOpt<T>(value: T | undefined): CandidOpt<T> {
-  return value === undefined ? [] : [value];
-}
-
-function toChildAppConfig(config: AppPreviewConfig): ChildAppConfig {
-  const normalized = toCanisterConfig(config);
-  return {
-    name: normalized.name,
-    headline: normalized.headline,
-    description: normalized.description,
-    accentColor: normalized.accentColor,
-    primaryLink: normalized.primaryLink,
-    contact: normalized.contact,
-    about: candidOpt(normalized.about),
-    heroImageUrl: candidOpt(normalized.heroImageUrl),
-    resumeUrl: candidOpt(normalized.resumeUrl),
-    skills: candidOpt(normalized.skills),
-    socialLinks: candidOpt(normalized.socialLinks),
-    projects: candidOpt(normalized.projects),
   };
 }
 
@@ -739,6 +695,19 @@ function renderAppPreview(
   `;
 }
 
+function renderHeroImageField(value: string): string {
+  return `
+    <div class="image-field">
+      <label>Hero/banner image<input name="heroImageUrl" type="url" placeholder="https://..." value="${html(value)}" /></label>
+      <label class="file-picker">
+        <span>Upload image</span>
+        <input data-image-upload="heroImageUrl" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      </label>
+    </div>
+    <p class="field-help image-upload-status" data-image-status="heroImageUrl">Use an HTTPS image URL or upload a PNG, JPEG, WebP, or GIF. Uploads are resized before saving.</p>
+  `;
+}
+
 function renderLivePortfolioEditor(config: AppPreviewConfig): string {
   return `
     <form class="live-config-form" id="live-config-form">
@@ -757,10 +726,8 @@ function renderLivePortfolioEditor(config: AppPreviewConfig): string {
         <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(config.primaryLink)}" /></label>
         <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(config.contact)}" /></label>
       </div>
-      <div class="field-row">
-        <label>Hero image<input name="heroImageUrl" type="url" placeholder="https://..." value="${html(config.heroImageUrl)}" /></label>
-        <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(config.resumeUrl)}" /></label>
-      </div>
+      ${renderHeroImageField(config.heroImageUrl)}
+      <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(config.resumeUrl)}" /></label>
       <label>Skills<textarea name="skills" maxlength="500">${html(config.skills.join(", "))}</textarea></label>
       <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(config.socialLinks))}</textarea></label>
       <label>Projects<textarea name="projects" maxlength="3000">${html(projectsToText(config.projects))}</textarea></label>
@@ -1201,10 +1168,8 @@ function render(): void {
                 <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
                 <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
               </div>
-              <div class="field-row">
-                <label>Hero image<input name="heroImageUrl" type="url" placeholder="https://..." value="${html(draftConfig.heroImageUrl)}" /></label>
-                <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
-              </div>
+              ${renderHeroImageField(draftConfig.heroImageUrl)}
+              <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
               <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
               <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
               <label>Projects<textarea name="projects" maxlength="3000">${html(projectsToText(draftConfig.projects))}</textarea></label>
@@ -1278,6 +1243,7 @@ function render(): void {
   `;
 
   bindEvents();
+  syncBusyDom();
 }
 
 function bindEvents(): void {
@@ -1313,11 +1279,16 @@ function bindEvents(): void {
   });
   document
     .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-      "#launch-form input:not([name='fundingMonths']), #launch-form textarea",
+      "#launch-form input:not([name='fundingMonths']):not([type='file']), #launch-form textarea",
     )
     .forEach((field) => {
       field.addEventListener("input", refreshDraftPreview);
     });
+  document.querySelectorAll<HTMLInputElement>("#launch-form [data-image-upload]").forEach((field) => {
+    field.addEventListener("change", () => {
+      void handleImageUpload(field, refreshDraftPreview);
+    });
+  });
 
   document.querySelectorAll<HTMLInputElement>('input[name="fundingMonths"]').forEach((input) => {
     input.addEventListener("change", () => updatePricingPreview(Number(input.value)));
@@ -1350,11 +1321,16 @@ function bindEvents(): void {
   });
   document
     .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-      "#live-config-form input, #live-config-form textarea",
+      "#live-config-form input:not([type='file']), #live-config-form textarea",
     )
     .forEach((field) => {
       field.addEventListener("input", refreshLivePreview);
     });
+  document.querySelectorAll<HTMLInputElement>("#live-config-form [data-image-upload]").forEach((field) => {
+    field.addEventListener("change", () => {
+      void handleImageUpload(field, refreshLivePreview);
+    });
+  });
 
   document.querySelectorAll<HTMLElement>("[data-order]").forEach((row) => {
     row.addEventListener("click", () => {
@@ -1459,6 +1435,40 @@ function refreshLivePreview(): void {
   );
 }
 
+async function handleImageUpload(
+  input: HTMLInputElement,
+  refreshPreview: () => void,
+): Promise<void> {
+  const fieldName = input.dataset.imageUpload;
+  const file = input.files?.[0];
+  const form = input.closest("form");
+  const status = form?.querySelector<HTMLElement>(
+    `[data-image-status="${fieldName}"]`,
+  );
+  if (!fieldName || !file || !form) return;
+
+  try {
+    if (status) status.textContent = "Processing image...";
+    const dataUrl = await imageFileToDataUrl(file);
+    const target = form.elements.namedItem(fieldName);
+    if (!(target instanceof HTMLInputElement)) {
+      throw new Error("Image field is unavailable.");
+    }
+    target.value = dataUrl;
+    refreshPreview();
+    if (status) {
+      status.textContent =
+        "Image uploaded into this app config. Save the app to publish it.";
+    }
+  } catch (error) {
+    if (status) {
+      status.textContent = error instanceof Error ? error.message : String(error);
+    }
+  } finally {
+    input.value = "";
+  }
+}
+
 function updateRefundHelp(): void {
   const assetId = document.querySelector<HTMLSelectElement>("#origin-asset")?.value;
   const token = tokens.find((candidate) => candidate.assetId === assetId);
@@ -1500,16 +1510,51 @@ async function readApiResponse<T>(
   return payload as T;
 }
 
-async function withBusy(task: () => Promise<void>): Promise<void> {
+function syncBusyDom(): void {
+  app.setAttribute("aria-busy", busy ? "true" : "false");
+  document.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
+    if (busy) {
+      if (!button.disabled) {
+        button.disabled = true;
+        button.dataset.busyDisabled = "true";
+      }
+    } else if (button.dataset.busyDisabled === "true") {
+      button.disabled = false;
+      delete button.dataset.busyDisabled;
+    }
+  });
+
+  let indicator = document.querySelector<HTMLElement>(".busy-toast");
+  if (busy) {
+    if (!indicator) {
+      indicator = document.createElement("div");
+      indicator.className = "busy-toast";
+      indicator.setAttribute("role", "status");
+      indicator.setAttribute("aria-live", "polite");
+      document.body.append(indicator);
+    }
+    indicator.textContent = busyMessage || "Working...";
+  } else {
+    indicator?.remove();
+  }
+}
+
+async function withBusy(
+  task: () => Promise<void>,
+  message = "Working on ICP...",
+): Promise<void> {
   if (busy) return;
   busy = true;
+  busyMessage = message;
   notice = "";
+  syncBusyDom();
   try {
     await task();
   } catch (error) {
     notice = error instanceof Error ? error.message : String(error);
   } finally {
     busy = false;
+    busyMessage = "";
     render();
   }
 }
@@ -1574,7 +1619,7 @@ async function signIn(): Promise<void> {
     currentOrder = orders[0] || null;
     if (currentOrder) await restoreQuote(currentOrder);
     notice = "Internet Identity connected.";
-  });
+  }, "Opening Internet Identity...");
 }
 
 async function signOut(): Promise<void> {
@@ -1590,7 +1635,7 @@ async function signOut(): Promise<void> {
     admins = [];
     await loadAdminAccess();
     notice = "Signed out.";
-  });
+  }, "Signing out...");
 }
 
 async function createOrder(form: HTMLFormElement): Promise<void> {
@@ -1608,7 +1653,7 @@ async function createOrder(form: HTMLFormElement): Promise<void> {
     paymentError = "";
     await loadOrders();
     notice = `Order #${currentOrder.id.toString()} created on ICP.`;
-  });
+  }, "Creating deployment order...");
 }
 
 async function requestQuote(): Promise<void> {
@@ -1656,7 +1701,7 @@ async function requestQuote(): Promise<void> {
       paymentError = error instanceof Error ? error.message : String(error);
       throw error;
     }
-  });
+  }, "Requesting payment quote...");
 }
 
 async function restoreQuote(order: DeploymentOrder): Promise<void> {
@@ -1676,7 +1721,7 @@ async function selectOrder(order: DeploymentOrder): Promise<void> {
     currentOrder = order;
     await restoreQuote(order);
     location.hash = "#launch";
-  });
+  }, "Loading deployment...");
 }
 
 async function settleMockPayment(): Promise<void> {
@@ -1696,7 +1741,7 @@ async function settleMockPayment(): Promise<void> {
     await refreshCurrentOrder();
     await loadOrders();
     notice = "Simulated payment proof accepted by the ICP backend.";
-  });
+  }, "Submitting simulated settlement...");
 }
 
 async function submitDepositTransaction(): Promise<void> {
@@ -1715,7 +1760,7 @@ async function submitDepositTransaction(): Promise<void> {
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Transaction submission failed.");
     notice = "Deposit transaction submitted to NEAR Intents.";
-  });
+  }, "Submitting transaction hash...");
 }
 
 async function refreshPaymentStatus(): Promise<void> {
@@ -1732,7 +1777,7 @@ async function refreshPaymentStatus(): Promise<void> {
     await refreshCurrentOrder();
     await loadOrders();
     notice = `Payment status: ${paymentStatusLabel(payload.status)}.`;
-  });
+  }, "Checking payment status...");
 }
 
 async function deployCurrentOrder(): Promise<void> {
@@ -1741,7 +1786,7 @@ async function deployCurrentOrder(): Promise<void> {
     currentOrder = unwrapResult(await actor.deployPaidOrder(currentOrder.id));
     await Promise.all([loadOrders(), loadFactoryReadiness()]);
     notice = "The factory installed your app canister.";
-  });
+  }, "Deploying app canister...");
 }
 
 async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
@@ -1754,17 +1799,6 @@ async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
     }
 
     const nextConfig = previewConfigFromForm(form);
-    const identity = await authClient.getIdentity();
-    const childActor = createChildAppActor(
-      currentOrder.createdCanisterId,
-      identity,
-    );
-    const childOwner = await childActor.getOwner();
-    if (childOwner.toText() !== principal) {
-      throw new Error("Your Internet Identity principal is not the owner of this app.");
-    }
-
-    await childActor.updateConfig(toChildAppConfig(nextConfig));
     currentOrder = unwrapResult(
       await actor.updateDeploymentOrderConfig(
         currentOrder.id,
@@ -1772,8 +1806,8 @@ async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
       ),
     );
     await loadOrders();
-    notice = "Live portfolio updated.";
-  });
+    notice = "Live app updated.";
+  }, "Updating the live app canister...");
 }
 
 async function cancelCurrentOrder(): Promise<void> {
@@ -1818,7 +1852,7 @@ async function cancelCurrentOrder(): Promise<void> {
     currentOrder = orders[0] || null;
     if (currentOrder) await restoreQuote(currentOrder);
     notice = `Order #${order.id.toString()} canceled.`;
-  });
+  }, "Canceling order...");
 }
 
 async function refreshCurrentOrder(): Promise<void> {
@@ -1918,7 +1952,7 @@ async function savePricing(form: HTMLFormElement): Promise<void> {
     await loadPublicData();
     await loadFactoryReadiness();
     notice = "Pricing updated for future orders.";
-  });
+  }, "Saving pricing...");
 }
 
 async function applyConservativeCyclePreset(): Promise<void> {
@@ -1929,7 +1963,7 @@ async function applyConservativeCyclePreset(): Promise<void> {
     await loadFactoryReadiness();
     notice =
       "Conservative cycle preset applied. USD prices were left unchanged.";
-  });
+  }, "Applying cycle preset...");
 }
 
 async function savePaymentConfig(form: HTMLFormElement): Promise<void> {
@@ -1951,7 +1985,7 @@ async function savePaymentConfig(form: HTMLFormElement): Promise<void> {
     );
     await loadPublicData();
     notice = "Payment configuration updated. Keep the relayer settlement asset in sync.";
-  });
+  }, "Saving payment configuration...");
 }
 
 async function toggleOrders(): Promise<void> {
@@ -1962,7 +1996,7 @@ async function toggleOrders(): Promise<void> {
     notice = publicConfig.ordersEnabled
       ? "New orders enabled."
       : "New orders paused.";
-  });
+  }, "Updating order availability...");
 }
 
 async function saveTemplate(form: HTMLFormElement): Promise<void> {
@@ -1981,7 +2015,7 @@ async function saveTemplate(form: HTMLFormElement): Promise<void> {
     );
     await loadPublicData();
     notice = `${template.name} updated.`;
-  });
+  }, "Saving template...");
 }
 
 async function addAdmin(form: HTMLFormElement): Promise<void> {
@@ -1992,7 +2026,7 @@ async function addAdmin(form: HTMLFormElement): Promise<void> {
     unwrapUnit(await actor.addAdmin(newAdmin));
     await loadAdminAccess();
     notice = "Admin principal added.";
-  });
+  }, "Adding admin...");
 }
 
 async function removeAdmin(value: string): Promise<void> {
@@ -2001,7 +2035,7 @@ async function removeAdmin(value: string): Promise<void> {
     unwrapUnit(await actor.removeAdmin(Principal.fromText(value)));
     await loadAdminAccess();
     notice = "Admin principal removed.";
-  });
+  }, "Removing admin...");
 }
 
 async function updateRelayer(form: HTMLFormElement): Promise<void> {
@@ -2012,7 +2046,7 @@ async function updateRelayer(form: HTMLFormElement): Promise<void> {
     unwrapUnit(await actor.setSettlementRelayer(nextRelayer));
     await loadAdminAccess();
     notice = "Settlement relayer updated.";
-  });
+  }, "Updating settlement relayer...");
 }
 
 async function init(): Promise<void> {

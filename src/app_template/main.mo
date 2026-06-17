@@ -5,7 +5,9 @@ import Text "mo:core/Text";
 import Validation "../backend/lib/Validation";
 import Types "../shared/Types";
 
-shared (_install) actor class GeneratedApp(init : Types.ChildInit) {
+shared (install) actor class GeneratedApp(init : Types.ChildInit) {
+  transient let platformController = install.caller;
+  transient let TEMPLATE_VERSION : Nat = 2;
   var owner = init.owner;
   let templateId = init.templateId;
   var config = init.config;
@@ -211,6 +213,10 @@ shared (_install) actor class GeneratedApp(init : Types.ChildInit) {
     owner;
   };
 
+  public query func getTemplateVersion() : async Nat {
+    TEMPLATE_VERSION;
+  };
+
   public query func getTemplateInfo() : async Types.ChildTemplateInfo {
     { templateId };
   };
@@ -219,8 +225,19 @@ shared (_install) actor class GeneratedApp(init : Types.ChildInit) {
     { owner; templateId; config };
   };
 
-  public shared ({ caller }) func updateConfig(next : Types.AppConfig) : async () {
+  func requireOwner(caller : Principal) {
+    if (caller.isAnonymous()) Runtime.trap("Anonymous caller is not allowed.");
     if (caller != owner) Runtime.trap("Caller is not this app's owner.");
+  };
+
+  func requireEditor(caller : Principal) {
+    if (caller.isAnonymous()) Runtime.trap("Anonymous caller is not allowed.");
+    if (caller != owner and caller != platformController) {
+      Runtime.trap("Caller cannot edit this app.");
+    };
+  };
+
+  func applyConfig(next : Types.AppConfig) {
     switch (Validation.appConfig(next)) {
       case (#err(message)) Runtime.trap(message);
       case (#ok(())) {};
@@ -228,8 +245,23 @@ shared (_install) actor class GeneratedApp(init : Types.ChildInit) {
     config := next;
   };
 
+  public shared ({ caller }) func updateConfig(next : Types.AppConfig) : async () {
+    requireEditor(caller);
+    applyConfig(next);
+  };
+
+  public shared ({ caller }) func updateConfigForOwner(
+    expectedOwner : Principal,
+    next : Types.AppConfig,
+  ) : async () {
+    if (caller.isAnonymous()) Runtime.trap("Anonymous caller is not allowed.");
+    if (caller != platformController) Runtime.trap("Caller is not the platform controller.");
+    if (expectedOwner != owner) Runtime.trap("App owner no longer matches this deployment order.");
+    applyConfig(next);
+  };
+
   public shared ({ caller }) func transferOwnership(nextOwner : Principal) : async () {
-    if (caller != owner) Runtime.trap("Caller is not this app's owner.");
+    requireOwner(caller);
     if (nextOwner.isAnonymous()) Runtime.trap("Owner cannot be anonymous.");
     owner := nextOwner;
   };

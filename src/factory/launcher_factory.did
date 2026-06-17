@@ -44,6 +44,25 @@ type FactoryDeployResult = variant {
   err : FactoryDeployError;
 };
 
+type FactoryUpdateRequest = record {
+  orderId : nat;
+  owner : principal;
+  templateId : text;
+  canisterId : principal;
+  config : AppConfig;
+  allowReinstall : bool;
+};
+
+type FactoryUpdateMode = variant {
+  Upgraded;
+  Reinstalled;
+};
+
+type FactoryUpdateResult = variant {
+  ok : FactoryUpdateMode;
+  err : FactoryDeployError;
+};
+
 type FactoryDeploymentStatus = variant {
   Creating;
   Created;
@@ -82,5 +101,6 @@ service : () -> {
   getTemplateWasmInfo : () -> (
     record { configured : bool; hash : opt blob; size : nat }
   ) query;
+  updateDeployment : (FactoryUpdateRequest) -> (FactoryUpdateResult);
   uploadTemplateWasm : (blob, blob) -> (ResultUnit);
 }

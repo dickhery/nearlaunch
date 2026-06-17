@@ -141,6 +141,25 @@ module {
     #err : FactoryDeployError;
   };
 
+  public type FactoryUpdateRequest = {
+    orderId : Nat;
+    owner : Principal;
+    templateId : Text;
+    canisterId : Principal;
+    config : AppConfig;
+    allowReinstall : Bool;
+  };
+
+  public type FactoryUpdateMode = {
+    #Upgraded;
+    #Reinstalled;
+  };
+
+  public type FactoryUpdateResult = {
+    #ok : FactoryUpdateMode;
+    #err : FactoryDeployError;
+  };
+
   public type FactoryDeploymentStatus = {
     #Creating;
     #Created;

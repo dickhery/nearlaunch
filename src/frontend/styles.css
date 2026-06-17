@@ -626,6 +626,44 @@ footer {
   gap: 18px;
 }
 
+.image-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.image-field label {
+  margin-top: 24px;
+}
+
+.file-picker {
+  min-height: 48px;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink) !important;
+  padding: 0 16px;
+  cursor: pointer;
+  font-size: 0.76rem !important;
+  font-weight: 800 !important;
+}
+
+.file-picker input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-picker:hover {
+  border-color: var(--green);
+}
+
 input,
 textarea,
 select {
@@ -1352,6 +1390,36 @@ footer a {
   font-size: 0.82rem;
 }
 
+.busy-toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 12;
+  max-width: min(420px, calc(100% - 48px));
+  border: 1px solid rgba(121, 242, 192, 0.55);
+  border-radius: 7px;
+  background: #101714;
+  color: #dce6e2;
+  padding: 16px 18px;
+  box-shadow: 0 20px 60px #000a;
+  font-size: 0.82rem;
+}
+
+.busy-toast::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  margin-right: 10px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 16px var(--green);
+}
+
+button[data-busy-disabled="true"] {
+  cursor: progress;
+}
+
 @media (max-width: 1050px) {
   .hero {
     grid-template-columns: 1fr;
@@ -1454,6 +1522,7 @@ footer a {
   }
 
   .field-row,
+  .image-field,
   .order-facts,
   .admin-grid,
   .admin-status-grid,

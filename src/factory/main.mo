@@ -55,6 +55,10 @@ shared (install) actor class LauncherFactory() = Self {
     module_hash : ?Blob;
   };
 
+  type ChildApp = actor {
+    updateConfigForOwner : shared (Principal, Types.AppConfig) -> async ();
+  };
+
   transient let ic : actor {
     create_canister : shared ({ settings : ?CanisterSettings }) -> async CreateCanisterResult;
     canister_status : shared ({ canister_id : Principal }) -> async CanisterStatus;
@@ -88,6 +92,10 @@ shared (install) actor class LauncherFactory() = Self {
   };
 
   func failure(message : Text, canisterId : ?Principal) : Types.FactoryDeployResult {
+    #err({ message; canisterId });
+  };
+
+  func updateFailure(message : Text, canisterId : ?Principal) : Types.FactoryUpdateResult {
     #err({ message; canisterId });
   };
 
@@ -321,6 +329,169 @@ shared (install) actor class LauncherFactory() = Self {
         },
       );
       failure(message, null);
+    } finally {
+      release(request.orderId);
+    };
+  };
+
+  public shared ({ caller }) func updateDeployment(
+    request : Types.FactoryUpdateRequest
+  ) : async Types.FactoryUpdateResult {
+    requireLauncher(caller);
+
+    let wasm = switch (appWasm) {
+      case (?value) value;
+      case (null) {
+        return updateFailure("No approved app template Wasm has been uploaded.", ?request.canisterId);
+      };
+    };
+
+    switch (acquire(request.orderId)) {
+      case (#err(message)) return updateFailure(message, ?request.canisterId);
+      case (#ok(())) {};
+    };
+
+    try {
+      switch (deployments.get(request.orderId)) {
+        case (?deployment) {
+          if (deployment.owner != request.owner or deployment.templateId != request.templateId) {
+            return updateFailure(
+              "Order ID is already bound to different deployment details.",
+              deployment.canisterId,
+            );
+          };
+          switch (deployment.canisterId) {
+            case (?existingCanisterId) {
+              if (existingCanisterId != request.canisterId) {
+                return updateFailure(
+                  "Order ID is already bound to a different app canister.",
+                  ?existingCanisterId,
+                );
+              };
+            };
+            case (null) {};
+          };
+        };
+        case (null) {};
+      };
+
+      deployments.add(
+        request.orderId,
+        {
+          orderId = request.orderId;
+          owner = request.owner;
+          templateId = request.templateId;
+          status = #Installing;
+          canisterId = ?request.canisterId;
+          error = null;
+        },
+      );
+
+      let initArg = to_candid ({
+        owner = request.owner;
+        templateId = request.templateId;
+        config = request.config;
+      } : Types.ChildInit);
+
+      var reinstalled = false;
+      try {
+        await ic.install_code({
+          mode = #upgrade;
+          canister_id = request.canisterId;
+          wasm_module = wasm;
+          arg = initArg;
+        });
+      } catch (upgradeError) {
+        if (not request.allowReinstall) {
+          let message = "Template upgrade failed: " # upgradeError.message();
+          deployments.add(
+            request.orderId,
+            {
+              orderId = request.orderId;
+              owner = request.owner;
+              templateId = request.templateId;
+              status = #Failed;
+              canisterId = ?request.canisterId;
+              error = ?message;
+            },
+          );
+          return updateFailure(message, ?request.canisterId);
+        };
+
+        try {
+          await ic.install_code({
+            mode = #reinstall;
+            canister_id = request.canisterId;
+            wasm_module = wasm;
+            arg = initArg;
+          });
+          reinstalled := true;
+        } catch (reinstallError) {
+          let message =
+            "Template upgrade failed (" # upgradeError.message() #
+            ") and reinstall failed: " # reinstallError.message();
+          deployments.add(
+            request.orderId,
+            {
+              orderId = request.orderId;
+              owner = request.owner;
+              templateId = request.templateId;
+              status = #Failed;
+              canisterId = ?request.canisterId;
+              error = ?message;
+            },
+          );
+          return updateFailure(message, ?request.canisterId);
+        };
+      };
+
+      if (not reinstalled) {
+        let child : ChildApp = actor (request.canisterId.toText());
+        try {
+          await child.updateConfigForOwner(request.owner, request.config);
+        } catch (configError) {
+          let message = "Template upgraded, but live config update failed: " # configError.message();
+          deployments.add(
+            request.orderId,
+            {
+              orderId = request.orderId;
+              owner = request.owner;
+              templateId = request.templateId;
+              status = #Failed;
+              canisterId = ?request.canisterId;
+              error = ?message;
+            },
+          );
+          return updateFailure(message, ?request.canisterId);
+        };
+      };
+
+      deployments.add(
+        request.orderId,
+        {
+          orderId = request.orderId;
+          owner = request.owner;
+          templateId = request.templateId;
+          status = #Live;
+          canisterId = ?request.canisterId;
+          error = null;
+        },
+      );
+      #ok(if (reinstalled) #Reinstalled else #Upgraded);
+    } catch (error) {
+      let message = "Live app update failed: " # error.message();
+      deployments.add(
+        request.orderId,
+        {
+          orderId = request.orderId;
+          owner = request.owner;
+          templateId = request.templateId;
+          status = #Failed;
+          canisterId = ?request.canisterId;
+          error = ?message;
+        },
+      );
+      updateFailure(message, ?request.canisterId);
     } finally {
       release(request.orderId);
     };

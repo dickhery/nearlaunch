@@ -67,7 +67,9 @@ service : (ChildInit) -> {
   getConfig : () -> (ChildInit) query;
   getOwner : () -> (principal) query;
   getTemplateInfo : () -> (ChildTemplateInfo) query;
+  getTemplateVersion : () -> (nat) query;
   http_request : (HttpRequest) -> (HttpResponse) query;
   transferOwnership : (principal) -> ();
   updateConfig : (AppConfig) -> ();
+  updateConfigForOwner : (principal, AppConfig) -> ();
 }

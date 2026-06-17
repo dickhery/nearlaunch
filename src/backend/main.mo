@@ -98,6 +98,7 @@ shared (install) actor class LauncherBackend() {
 
   transient let factory : actor {
     deployOrder : shared Types.FactoryDeployRequest -> async Types.FactoryDeployResult;
+    updateDeployment : shared Types.FactoryUpdateRequest -> async Types.FactoryUpdateResult;
     getReadiness : shared query Nat -> async Types.FactoryReadiness;
   } = actor (factoryCanisterId);
 
@@ -704,6 +705,38 @@ shared (install) actor class LauncherBackend() {
     if (canceledOrders.contains(orderId)) return #err("Order was canceled.");
     if (order.status != #Live) {
       return #err("Only live apps can be edited after deployment.");
+    };
+    let canisterId = switch (order.createdCanisterId) {
+      case (?value) value;
+      case (null) return #err("This live deployment is missing its app canister ID.");
+    };
+
+    let factoryResult = try {
+      await factory.updateDeployment({
+        orderId;
+        owner = order.owner;
+        templateId = order.templateId;
+        canisterId;
+        config;
+        allowReinstall = true;
+      });
+    } catch (error) {
+      #err({
+        message = "Factory update failed: " # error.message();
+        canisterId = ?canisterId;
+      });
+    };
+
+    switch (factoryResult) {
+      case (#err(failure)) {
+        let failed = {
+          order with
+          error = ?failure.message;
+        };
+        orders.add(orderId, failed);
+        return #err(failure.message);
+      };
+      case (#ok(_mode)) {};
     };
 
     let updated = {

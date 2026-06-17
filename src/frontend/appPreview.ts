@@ -57,6 +57,21 @@ function safeHttpsUrl(value: string): string {
   }
 }
 
+function safeImageUrl(value: string): string {
+  const trimmed = value.trim();
+  const httpsUrl = safeHttpsUrl(trimmed);
+  if (httpsUrl) return httpsUrl;
+  if (
+    trimmed.length <= 450_000 &&
+    /^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(
+      trimmed,
+    )
+  ) {
+    return trimmed;
+  }
+  return "";
+}
+
 function renderSkills(skills: string[]): string {
   const items = skills
     .filter(Boolean)
@@ -87,7 +102,7 @@ function renderTags(tags: string[]): string {
 }
 
 function renderProject(project: AppPreviewProject): string {
-  const imageUrl = safeHttpsUrl(project.imageUrl);
+  const imageUrl = safeImageUrl(project.imageUrl);
   const projectUrl = safeHttpsUrl(project.url);
   const imageMarkup = imageUrl
     ? `<img src="${escapeHtml(imageUrl)}" alt="" loading="lazy">`
@@ -128,7 +143,7 @@ export function appPreviewDocument(
   const about = escapeHtml(config.about || config.description);
   const primaryLink = safeHttpsUrl(config.primaryLink);
   const resumeUrl = safeHttpsUrl(config.resumeUrl);
-  const heroImageUrl = safeHttpsUrl(config.heroImageUrl);
+  const heroImageUrl = safeImageUrl(config.heroImageUrl);
   const linkMarkup = primaryLink
     ? `<a class="primary" href="${escapeHtml(primaryLink)}" target="_blank" rel="noreferrer">Explore the work</a>`
     : "";

@@ -5,11 +5,24 @@ import Text "mo:core/Text";
 import Types "../../shared/Types";
 
 module {
+  let MAX_HTTPS_URL_LENGTH : Nat = 240;
+  let MAX_INLINE_IMAGE_LENGTH : Nat = 450_000;
+  let MAX_CONFIG_TEXT_LENGTH : Nat = 650_000;
+
   func isHexDigit(char : Char) : Bool {
     switch (char) {
       case ('0' or '1' or '2' or '3' or '4' or '5' or '6' or '7' or '8' or '9') true;
       case ('a' or 'b' or 'c' or 'd' or 'e' or 'f') true;
       case ('A' or 'B' or 'C' or 'D' or 'E' or 'F') true;
+      case (_) false;
+    };
+  };
+
+  func isBase64Char(char : Char) : Bool {
+    switch (char) {
+      case ('A' or 'B' or 'C' or 'D' or 'E' or 'F' or 'G' or 'H' or 'I' or 'J' or 'K' or 'L' or 'M' or 'N' or 'O' or 'P' or 'Q' or 'R' or 'S' or 'T' or 'U' or 'V' or 'W' or 'X' or 'Y' or 'Z') true;
+      case ('a' or 'b' or 'c' or 'd' or 'e' or 'f' or 'g' or 'h' or 'i' or 'j' or 'k' or 'l' or 'm' or 'n' or 'o' or 'p' or 'q' or 'r' or 's' or 't' or 'u' or 'v' or 'w' or 'x' or 'y' or 'z') true;
+      case ('0' or '1' or '2' or '3' or '4' or '5' or '6' or '7' or '8' or '9' or '+' or '/' or '=') true;
       case (_) false;
     };
   };
@@ -29,11 +42,57 @@ module {
     true;
   };
 
+  func inlineImagePrefixLength(value : Text) : ?Nat {
+    if (value.startsWith(#text("data:image/jpeg;base64,"))) {
+      ?("data:image/jpeg;base64,".size());
+    } else if (value.startsWith(#text("data:image/jpg;base64,"))) {
+      ?("data:image/jpg;base64,".size());
+    } else if (value.startsWith(#text("data:image/png;base64,"))) {
+      ?("data:image/png;base64,".size());
+    } else if (value.startsWith(#text("data:image/webp;base64,"))) {
+      ?("data:image/webp;base64,".size());
+    } else if (value.startsWith(#text("data:image/gif;base64,"))) {
+      ?("data:image/gif;base64,".size());
+    } else {
+      null;
+    };
+  };
+
+  func isInlineImage(value : Text) : Bool {
+    let prefixLength = switch (inlineImagePrefixLength(value)) {
+      case (?length) length;
+      case (null) return false;
+    };
+
+    var index : Nat = 0;
+    var payloadLength : Nat = 0;
+    for (char in value.chars()) {
+      if (index >= prefixLength) {
+        payloadLength += 1;
+        if (not isBase64Char(char)) return false;
+      };
+      index += 1;
+    };
+    payloadLength > 0;
+  };
+
   func requireHttpsUrl(value : Text, fieldName : Text) : Result.Result<(), Text> {
     if (value.size() == 0) return #ok(());
-    if (value.size() > 240) return #err(fieldName # " URL is too long.");
+    if (value.size() > MAX_HTTPS_URL_LENGTH) return #err(fieldName # " URL is too long.");
     if (not value.startsWith(#text("https://"))) {
       return #err(fieldName # " must use https://.");
+    };
+    #ok(());
+  };
+
+  func requireImageUrl(value : Text, fieldName : Text) : Result.Result<(), Text> {
+    if (value.size() == 0) return #ok(());
+    if (value.startsWith(#text("https://"))) return requireHttpsUrl(value, fieldName);
+    if (value.size() > MAX_INLINE_IMAGE_LENGTH) {
+      return #err(fieldName # " upload is too large. Use a smaller image.");
+    };
+    if (not isInlineImage(value)) {
+      return #err(fieldName # " must use https:// or an uploaded PNG, JPEG, WebP, or GIF image.");
     };
     #ok(());
   };
@@ -53,6 +112,55 @@ module {
         };
       };
     };
+  };
+
+  func optionalTextSize(value : ?Text) : Nat {
+    switch (value) {
+      case (?text) text.size();
+      case (null) 0;
+    };
+  };
+
+  func appConfigTextSize(config : Types.AppConfig) : Nat {
+    var total =
+      config.name.size() +
+      config.headline.size() +
+      config.description.size() +
+      config.accentColor.size() +
+      config.primaryLink.size() +
+      config.contact.size() +
+      optionalTextSize(config.about) +
+      optionalTextSize(config.heroImageUrl) +
+      optionalTextSize(config.resumeUrl);
+
+    switch (config.skills) {
+      case (?items) {
+        for (item in items.vals()) total += item.size();
+      };
+      case (null) {};
+    };
+    switch (config.socialLinks) {
+      case (?items) {
+        for (link in items.vals()) {
+          total += link.labelText.size() + link.url.size();
+        };
+      };
+      case (null) {};
+    };
+    switch (config.projects) {
+      case (?items) {
+        for (project in items.vals()) {
+          total +=
+            project.title.size() +
+            project.description.size() +
+            project.url.size() +
+            project.imageUrl.size();
+          for (tag in project.tags.vals()) total += tag.size();
+        };
+      };
+      case (null) {};
+    };
+    total;
   };
 
   func validateSkills(skills : ?[Text]) : Result.Result<(), Text> {
@@ -100,7 +208,7 @@ module {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
-    switch (requireHttpsUrl(project.imageUrl, "Project image")) {
+    switch (requireImageUrl(project.imageUrl, "Project image")) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
@@ -148,6 +256,9 @@ module {
   };
 
   public func appConfig(config : Types.AppConfig) : Result.Result<(), Text> {
+    if (appConfigTextSize(config) > MAX_CONFIG_TEXT_LENGTH) {
+      return #err("App content is too large. Use smaller uploaded images or fewer project images.");
+    };
     if (config.name.size() < 2 or config.name.size() > 80) {
       return #err("App name must be between 2 and 80 characters.");
     };
@@ -173,7 +284,7 @@ module {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
-    switch (requireHttpsUrl(switch (config.heroImageUrl) { case (?url) url; case (null) "" }, "Hero image")) {
+    switch (requireImageUrl(switch (config.heroImageUrl) { case (?url) url; case (null) "" }, "Hero image")) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
