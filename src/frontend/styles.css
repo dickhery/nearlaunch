@@ -1778,3 +1778,52 @@ button[data-busy-disabled="true"] {
     justify-content: center;
   }
 }
+
+.static-site-upload {
+  display: grid;
+  gap: 12px;
+}
+
+.file-picker.wide {
+  width: 100%;
+}
+
+.static-site-files {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel-2);
+  padding: 14px 16px;
+}
+
+.static-site-files-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.static-site-files ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.static-site-files li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.92rem;
+}
+
+.static-site-files code {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--green);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

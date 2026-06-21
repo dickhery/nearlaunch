@@ -41,8 +41,8 @@ function templateEyebrow(templateId: string): string {
       return "Independent work, permanently online";
     case "startup":
       return "A new product, launched on ICP";
-    case "grant":
-      return "Open milestones, public progress";
+    case "static-site":
+      return "Your files, hosted on ICP";
     default:
       return "Deployed on the Internet Computer";
   }
@@ -162,8 +162,8 @@ export function appPreviewDocument(
       ? "Owner-managed ICP portfolio"
       : templateId === "startup"
         ? "Owner-managed ICP landing page"
-        : templateId === "grant"
-          ? "Owner-managed ICP grant page"
+        : templateId === "static-site"
+          ? "Owner-managed static site on ICP"
           : "Deployed on the Internet Computer";
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">

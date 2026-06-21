@@ -11,10 +11,13 @@
     "check": "mops check && tsc --noEmit && vite build",
     "template:build": "mops build app_template",
     "template:upload": "node scripts/upload-template-wasm.mjs",
+    "asset:extract": "node scripts/extract-asset-wasm.mjs",
+    "asset:upload": "node scripts/upload-asset-wasm.mjs",
     "bootstrap:local": "node scripts/bootstrap-local.mjs"
   },
   "dependencies": {
     "@icp-sdk/auth": "7.1.0",
+    "@icp-sdk/canisters": "3.5.0",
     "@icp-sdk/core": "5.4.0",
     "express": "5.2.1"
   },

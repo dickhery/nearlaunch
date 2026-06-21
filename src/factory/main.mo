@@ -22,6 +22,8 @@ shared (install) actor class LauncherFactory() = Self {
   let inFlight = Map.empty<Nat, Bool>();
   var appWasm : ?Blob = null;
   var appWasmHash : ?Blob = null;
+  var assetWasm : ?Blob = null;
+  var assetWasmHash : ?Blob = null;
 
   let FACTORY_RESERVE : Nat = CyclePolicy.FACTORY_RESERVE_CYCLES;
   let MIN_CHILD_CYCLES : Nat = CyclePolicy.MIN_CHILD_CYCLES;
@@ -216,6 +218,21 @@ shared (install) actor class LauncherFactory() = Self {
     };
   };
 
+  public query func getAssetWasmInfo() : async {
+    configured : Bool;
+    hash : ?Blob;
+    size : Nat;
+  } {
+    {
+      configured = assetWasm != null;
+      hash = assetWasmHash;
+      size = switch (assetWasm) {
+        case (?wasm) wasm.size();
+        case (null) 0;
+      };
+    };
+  };
+
   public query func getCycleBalance() : async Nat {
     Cycles.balance();
   };
@@ -315,6 +332,11 @@ shared (install) actor class LauncherFactory() = Self {
       case (null) 0;
     };
     let templateWasmConfigured = appWasm != null;
+    let assetWasmSize = switch (assetWasm) {
+      case (?wasm) wasm.size();
+      case (null) 0;
+    };
+    let assetWasmConfigured = assetWasm != null;
     {
       cycleBalance;
       reserveCycles = CyclePolicy.readinessReserveCycles();
@@ -322,8 +344,9 @@ shared (install) actor class LauncherFactory() = Self {
       requiredCycles = targetCycles;
       templateWasmConfigured;
       templateWasmSize;
+      assetWasmConfigured;
+      assetWasmSize;
       canDeploy =
-        templateWasmConfigured and
         targetCycles <= MAX_CHILD_CYCLES and
         cycleBalance >= CyclePolicy.requiredFactoryBalance(targetCycles);
     };
@@ -347,6 +370,28 @@ shared (install) actor class LauncherFactory() = Self {
     #ok(());
   };
 
+  public shared ({ caller }) func uploadAssetCanisterWasm(
+    wasm : Blob,
+    expectedHash : Blob,
+  ) : async Result.Result<(), Text> {
+    requireOwner(caller);
+    if (wasm.size() == 0) return #err("Asset canister Wasm is empty.");
+    if (wasm.size() > MAX_WASM_BYTES) {
+      return #err("Asset canister Wasm exceeds the 1.9 MB ingress safety limit.");
+    };
+
+    let actualHash = Sha256.fromBlob(#sha256, wasm);
+    if (actualHash != expectedHash) return #err("Asset canister Wasm hash does not match.");
+
+    assetWasm := ?wasm;
+    assetWasmHash := ?actualHash;
+    #ok(());
+  };
+
+  func isStaticSiteTemplate(templateId : Text) : Bool {
+    templateId == "static-site";
+  };
+
   public shared ({ caller }) func deployOrder(
     request : Types.FactoryDeployRequest
   ) : async Types.FactoryDeployResult {
@@ -359,9 +404,17 @@ shared (install) actor class LauncherFactory() = Self {
       return failure("Requested child cycle allocation exceeds the factory limit.", null);
     };
 
-    let wasm = switch (appWasm) {
-      case (?value) value;
-      case (null) return failure("No approved app template Wasm has been uploaded.", null);
+    let staticSite = isStaticSiteTemplate(request.templateId);
+    let wasm = if (staticSite) {
+      switch (assetWasm) {
+        case (?value) value;
+        case (null) return failure("No approved asset canister Wasm has been uploaded.", null);
+      };
+    } else {
+      switch (appWasm) {
+        case (?value) value;
+        case (null) return failure("No approved app template Wasm has been uploaded.", null);
+      };
     };
 
     switch (acquire(request.orderId)) {
@@ -433,15 +486,20 @@ shared (install) actor class LauncherFactory() = Self {
       );
 
       try {
-        await ic.install_code({
-          mode = #install;
-          canister_id = canisterId;
-          wasm_module = wasm;
-          arg = to_candid ({
+        let installArg = if (staticSite) {
+          to_candid (() : ());
+        } else {
+          to_candid ({
             owner = request.owner;
             templateId = request.templateId;
             config = request.config;
           } : Types.ChildInit);
+        };
+        await ic.install_code({
+          mode = #install;
+          canister_id = canisterId;
+          wasm_module = wasm;
+          arg = installArg;
         });
 
         deployments.add(
@@ -494,6 +552,13 @@ shared (install) actor class LauncherFactory() = Self {
     request : Types.FactoryUpdateRequest
   ) : async Types.FactoryUpdateResult {
     requireLauncher(caller);
+
+    if (isStaticSiteTemplate(request.templateId)) {
+      return updateFailure(
+        "Static sites are updated by uploading files directly to the asset canister.",
+        ?request.canisterId,
+      );
+    };
 
     let wasm = switch (appWasm) {
       case (?value) value;

@@ -107,6 +107,8 @@ if (factoryBalance < localFactoryTarget) {
 
 run("mops", ["build", "app_template"]);
 run("node", ["scripts/upload-template-wasm.mjs"]);
+run(icpCli, ["build", "launcher_frontend"]);
+run("node", ["scripts/upload-asset-wasm.mjs"]);
 
 if (relayerIdentity !== deployIdentity) {
   const principal = run(

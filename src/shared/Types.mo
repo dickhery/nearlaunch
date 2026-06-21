@@ -207,6 +207,8 @@ module {
     requiredCycles : Nat;
     templateWasmConfigured : Bool;
     templateWasmSize : Nat;
+    assetWasmConfigured : Bool;
+    assetWasmSize : Nat;
     canDeploy : Bool;
   };
 

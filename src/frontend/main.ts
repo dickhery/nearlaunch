@@ -25,6 +25,13 @@ import {
   type AppPreviewLink,
   type AppPreviewProject,
 } from "./appPreview";
+import {
+  formatStaticSiteSize,
+  isStaticSiteTemplate,
+  uploadStaticSiteFiles,
+  validateStaticSiteFiles,
+} from "./staticSite";
+import { HttpAgent } from "@icp-sdk/core/agent";
 import "./styles.css";
 
 type LauncherActor = ReturnType<typeof createActor>;
@@ -119,6 +126,9 @@ let principal = "";
 let templates: Template[] = [];
 let orders: DeploymentOrder[] = [];
 let selectedTemplate = "portfolio";
+let staticSiteFiles: File[] = [];
+let staticSiteFilesByOrderId = new Map<bigint, File[]>();
+let staticSiteLiveFiles: File[] = [];
 let selectedTopUpCycles = TRILLION_CYCLES;
 let deployBreakdown: PricingBreakdown | null = null;
 let topUpBreakdown: PricingBreakdown | null = null;
@@ -644,14 +654,12 @@ function settlementLabel(order: DeploymentOrder): string {
 }
 
 function appUrl(order: DeploymentOrder): string | undefined {
-  if (
-    order.createdCanisterId &&
-    window.location.hostname.endsWith(".localhost")
-  ) {
+  if (order.createdCanisterId && window.location.hostname.endsWith(".localhost")) {
     const port = window.location.port ? `:${window.location.port}` : "";
-    return `${window.location.protocol}//${order.createdCanisterId.toText()}.raw.localhost${port}/`;
+    const hostPrefix = isStaticSiteTemplate(order.templateId) ? "" : "raw.";
+    return `${window.location.protocol}//${order.createdCanisterId.toText()}.${hostPrefix}localhost${port}/`;
   }
-  return order.appUrl;
+  return order.appUrl ?? undefined;
 }
 
 function statusLabel(status: DeploymentOrder["status"]): string {
@@ -707,15 +715,24 @@ function factoryTopUpShortfall(amount = selectedTopUpCycles): bigint | null {
     : 0n;
 }
 
+function factoryWasmConfigured(templateId = selectedTemplate): boolean {
+  if (!factoryReadiness) return false;
+  if (isStaticSiteTemplate(templateId)) {
+    return factoryReadiness.assetWasmConfigured === true;
+  }
+  return factoryReadiness.templateWasmConfigured === true;
+}
+
 function factoryCanDeploy(): boolean {
-  return factoryReadiness?.templateWasmConfigured === true &&
-    factoryReadiness.canDeploy === true;
+  return factoryWasmConfigured() && factoryReadiness?.canDeploy === true;
 }
 
 function factoryCapacityMessage(): string | null {
   if (!factoryReadiness) return null;
-  if (!factoryReadiness.templateWasmConfigured) {
-    return "Deployments are paused until the approved app template Wasm is uploaded.";
+  if (!factoryWasmConfigured()) {
+    return isStaticSiteTemplate(selectedTemplate)
+      ? "Static site deployments are paused until the asset canister Wasm is uploaded."
+      : "Deployments are paused until the approved app template Wasm is uploaded.";
   }
 
   const deployShortfall = factoryDeployShortfall();
@@ -757,7 +774,7 @@ function renderAvailability(): string {
       "The backend and relayer settlement asset IDs do not match. Payments are disabled until both are configured identically.",
     );
   }
-  if (factoryReadiness && !factoryReadiness.templateWasmConfigured) {
+  if (factoryReadiness && !factoryWasmConfigured()) {
     messages.push(factoryCapacityMessage() || "The factory is not ready.");
   } else {
     const capacityMessage = factoryCapacityMessage();
@@ -1205,12 +1222,17 @@ function renderCurrentOrder(): string {
       ${
         isLive || topUpOrder
           ? ""
-          : renderAppPreview(
-              savedConfig,
-              currentOrder.templateId,
-              "Saved order configuration",
-              "order-preview-frame",
-            )
+          : isStaticSiteTemplate(currentOrder.templateId)
+            ? renderStaticSiteFileList(
+                staticSiteFilesByOrderId.get(currentOrder.id) || [],
+                "order-static-site-file-list",
+              )
+            : renderAppPreview(
+                savedConfig,
+                currentOrder.templateId,
+                "Saved order configuration",
+                "order-preview-frame",
+              )
       }
       ${timeline(currentOrder)}
       <div class="order-facts">
@@ -1345,7 +1367,9 @@ function renderCurrentOrder(): string {
       }
       ${
         isLive && currentOrder.createdCanisterId
-          ? renderLivePortfolioEditor(savedConfig, currentOrder.templateId)
+          ? isStaticSiteTemplate(currentOrder.templateId)
+            ? renderLiveStaticSiteEditor()
+            : renderLivePortfolioEditor(savedConfig, currentOrder.templateId)
           : ""
       }
       ${currentOrder.error ? `<p class="error-message">${html(currentOrder.error)}</p>` : ""}
@@ -1389,9 +1413,96 @@ function renderPrincipalPanel(): string {
 
 function readinessStatus(): string {
   if (!factoryReadiness) return "Checking";
-  if (!factoryReadiness.templateWasmConfigured) return "Template missing";
+  if (!factoryReadiness.templateWasmConfigured && !factoryReadiness.assetWasmConfigured) {
+    return "Wasm missing";
+  }
   if (!factoryCanDeploy()) return "Needs cycles";
   return "Ready";
+}
+
+function staticSiteTotalBytes(files: File[]): number {
+  return files.reduce((total, file) => total + file.size, 0);
+}
+
+function staticSiteConfigFromDraft(name: string, files: File[]): AppPreviewConfig {
+  const totalBytes = staticSiteTotalBytes(files);
+  return {
+    name: name.trim() || "My static site",
+    headline: `${files.length} file${files.length === 1 ? "" : "s"} ready to deploy`,
+    description: `Static site package with ${formatStaticSiteSize(totalBytes)} of assets.`,
+    accentColor: "#2fbf8f",
+    primaryLink: "",
+    contact: "",
+    about: "",
+    heroImageUrl: "",
+    resumeUrl: "",
+    skills: [],
+    socialLinks: [],
+    projects: [],
+  };
+}
+
+function renderStaticSiteFileList(files: File[], listId: string): string {
+  if (files.length === 0) {
+    return `<p class="field-help" id="${listId}">No files selected yet. Include an <code>index.html</code> at the project root.</p>`;
+  }
+
+  const preview = files
+    .slice(0, 12)
+    .map((file) => {
+      const path = file.webkitRelativePath || file.name;
+      return `<li><code>${html(path)}</code><span>${formatStaticSiteSize(file.size)}</span></li>`;
+    })
+    .join("");
+
+  const overflow =
+    files.length > 12
+      ? `<li class="muted">+ ${files.length - 12} more files</li>`
+      : "";
+
+  return `
+    <div class="static-site-files" id="${listId}">
+      <div class="static-site-files-heading">
+        <strong>${files.length} files</strong>
+        <span>${formatStaticSiteSize(staticSiteTotalBytes(files))}</span>
+      </div>
+      <ul>${preview}${overflow}</ul>
+    </div>
+  `;
+}
+
+function renderStaticSiteBuilder(): string {
+  return `
+    <label>Site name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
+    <div class="static-site-upload">
+      <label class="file-picker wide">
+        <span>Choose project folder or files</span>
+        <input id="static-site-files" type="file" multiple webkitdirectory directory />
+      </label>
+      <p class="field-help">Upload a built static site folder. Your package must include <code>index.html</code>. Keep this tab open until deployment finishes.</p>
+      ${renderStaticSiteFileList(staticSiteFiles, "static-site-file-list")}
+    </div>
+  `;
+}
+
+function renderLiveStaticSiteEditor(): string {
+  return `
+    <form class="live-config-form" id="live-static-site-form">
+      <div class="form-heading">
+        <div>
+          <span class="section-label">Live static site</span>
+          <h4>Publish new files</h4>
+          <p class="field-help">Upload a replacement build to your live asset canister. Existing files with the same path are overwritten.</p>
+        </div>
+        <button class="button secondary" type="submit">Publish files</button>
+      </div>
+      <label class="file-picker wide">
+        <span>Choose replacement files</span>
+        <input id="static-site-live-files" type="file" multiple webkitdirectory directory />
+      </label>
+      ${renderStaticSiteFileList(staticSiteLiveFiles, "static-site-live-file-list")}
+    </form>
+  `;
 }
 
 function renderAdmin(): string {
@@ -1409,13 +1520,14 @@ function renderAdmin(): string {
       <div class="admin-status-grid">
         <article><small>Relayer</small><strong>${html(relayerHealth?.mode || "unknown")}</strong><span>${relayerHealth?.mode === "live" ? (relayerHealth.ready ? "Real swaps enabled" : "Configuration incomplete") : relayerHealth?.mode === "mock" ? "No real funds move" : "Unavailable"}</span></article>
         <article><small>Factory</small><strong>${html(readinessStatus())}</strong><span>${factoryReadiness ? `${cycles(factoryReadiness.cycleBalance)} available` : "Unavailable"}</span></article>
-        <article><small>Template Wasm</small><strong>${factoryReadiness?.templateWasmConfigured ? "Configured" : "Missing"}</strong><span>${factoryReadiness ? `${factoryReadiness.templateWasmSize.toString()} bytes` : "Unavailable"}</span></article>
+        <article><small>App Wasm</small><strong>${factoryReadiness?.templateWasmConfigured ? "Configured" : "Missing"}</strong><span>${factoryReadiness ? `${factoryReadiness.templateWasmSize.toString()} bytes` : "Unavailable"}</span></article>
+        <article><small>Asset Wasm</small><strong>${factoryReadiness?.assetWasmConfigured ? "Configured" : "Missing"}</strong><span>${factoryReadiness ? `${factoryReadiness.assetWasmSize.toString()} bytes` : "Unavailable"}</span></article>
         <article><small>New orders</small><strong>${publicConfig.ordersEnabled ? "Enabled" : "Paused"}</strong><button class="text-button" id="toggle-orders-button" type="button">${publicConfig.ordersEnabled ? "Pause" : "Enable"}</button></article>
       </div>
 
       ${
-        factoryReadiness && !factoryReadiness.templateWasmConfigured
-          ? `<div class="admin-alert"><strong>Factory setup required</strong><span>Run <code>pnpm template:build</code> and <code>pnpm template:upload</code> with the deployment identity before accepting payments.</span></div>`
+        factoryReadiness && (!factoryReadiness.templateWasmConfigured || !factoryReadiness.assetWasmConfigured)
+          ? `<div class="admin-alert"><strong>Factory setup required</strong><span>Run <code>pnpm template:build && pnpm template:upload</code> and <code>icp build launcher_frontend && pnpm asset:upload</code> with the deployment identity before accepting payments.</span></div>`
           : ""
       }
       ${
@@ -1595,28 +1707,34 @@ function render(): void {
                 <span class="section-label">Configure ${html(template?.name || "app")}</span>
                 <span class="price-preview" id="price-preview">from ${deployBreakdown ? money(deployBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
               </div>
-              <div class="field-row">
-                <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
-                ${renderAccentColorField(draftConfig.accentColor)}
-              </div>
-              <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
-              <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
-              <label>About<textarea name="about" maxlength="2000">${html(draftConfig.about)}</textarea></label>
-              <div class="field-row">
-                <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
-                <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
-              </div>
-              ${renderHeroImageField(draftConfig.heroImageUrl)}
-              <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
-              <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
-              <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
-              ${renderProjectsEditor(draftConfig.projects)}
-              ${renderAppPreview(
-                draftConfig,
-                selectedTemplate,
-                "Updates as you type",
-                "draft-preview-frame",
-              )}
+              ${
+                isStaticSiteTemplate(selectedTemplate)
+                  ? renderStaticSiteBuilder()
+                  : `
+                    <div class="field-row">
+                      <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
+                      ${renderAccentColorField(draftConfig.accentColor)}
+                    </div>
+                    <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
+                    <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
+                    <label>About<textarea name="about" maxlength="2000">${html(draftConfig.about)}</textarea></label>
+                    <div class="field-row">
+                      <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
+                      <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
+                    </div>
+                    ${renderHeroImageField(draftConfig.heroImageUrl)}
+                    <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
+                    <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
+                    <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
+                    ${renderProjectsEditor(draftConfig.projects)}
+                    ${renderAppPreview(
+                      draftConfig,
+                      selectedTemplate,
+                      "Updates as you type",
+                      "draft-preview-frame",
+                    )}
+                  `
+              }
               <div class="starter-cycles-note">
                 <span class="section-label">Pay as you go</span>
                 <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from your live app panel.</p>
@@ -1707,6 +1825,9 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-template]").forEach((element) => {
     element.addEventListener("click", () => {
       selectedTemplate = element.dataset.template || selectedTemplate;
+      if (isStaticSiteTemplate(selectedTemplate)) {
+        draftConfig = staticSiteConfigFromDraft("My static site", staticSiteFiles);
+      }
       void refreshDeployBreakdown().then(() => render());
     });
   });
@@ -1753,6 +1874,31 @@ function bindEvents(): void {
   if (launchForm) {
     bindProjectsEditor(launchForm, refreshDraftPreview);
   }
+  document.querySelector<HTMLInputElement>("#static-site-files")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement)) return;
+    staticSiteFiles = [...input.files || []];
+    const nameField = document.querySelector<HTMLInputElement>("#launch-form input[name='name']");
+    const siteName = nameField?.value.trim() || "My static site";
+    draftConfig = staticSiteConfigFromDraft(siteName, staticSiteFiles);
+    const list = document.querySelector("#static-site-file-list");
+    if (list) {
+      list.outerHTML = renderStaticSiteFileList(staticSiteFiles, "static-site-file-list");
+    }
+  });
+  document.querySelector<HTMLFormElement>("#live-static-site-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void publishLiveStaticSite();
+  });
+  document.querySelector<HTMLInputElement>("#static-site-live-files")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (!(input instanceof HTMLInputElement)) return;
+    staticSiteLiveFiles = [...input.files || []];
+    const list = document.querySelector("#static-site-live-file-list");
+    if (list) {
+      list.outerHTML = renderStaticSiteFileList(staticSiteLiveFiles, "static-site-live-file-list");
+    }
+  });
 
   document.querySelectorAll<HTMLInputElement>('input[name="topUpCycles"]').forEach((input) => {
     input.addEventListener("change", () => {
@@ -2168,22 +2314,31 @@ async function signOut(): Promise<void> {
 async function createOrder(form: HTMLFormElement): Promise<void> {
   await withBusy(async () => {
     if (!signedIn || !actor) throw new Error("Sign in before creating an order.");
-    const data = new FormData(form);
-    syncAccentColorFields(form);
-    draftConfig = previewConfigFromForm(form);
-    const projectsError = validateProjectsInForm(form, draftConfig.projects);
-    if (projectsError) {
-      throw new Error(projectsError);
-    }
-    const validationError = validatePreviewConfig(draftConfig);
-    if (validationError) {
-      throw new Error(validationError);
+    if (isStaticSiteTemplate(selectedTemplate)) {
+      const siteName = String(new FormData(form).get("name") || "").trim();
+      const filesError = validateStaticSiteFiles(staticSiteFiles);
+      if (filesError) throw new Error(filesError);
+      draftConfig = staticSiteConfigFromDraft(siteName, staticSiteFiles);
+    } else {
+      syncAccentColorFields(form);
+      draftConfig = previewConfigFromForm(form);
+      const projectsError = validateProjectsInForm(form, draftConfig.projects);
+      if (projectsError) {
+        throw new Error(projectsError);
+      }
+      const validationError = validatePreviewConfig(draftConfig);
+      if (validationError) {
+        throw new Error(validationError);
+      }
     }
     const result = await actor.createDeploymentOrder({
       templateId: selectedTemplate,
       config: toCanisterConfig(draftConfig),
     });
     currentOrder = unwrapResult(result);
+    if (isStaticSiteTemplate(selectedTemplate)) {
+      staticSiteFilesByOrderId.set(currentOrder.id, [...staticSiteFiles]);
+    }
     currentQuote = null;
     paymentError = "";
     await loadOrders();
@@ -2320,17 +2475,55 @@ async function refreshPaymentStatus(): Promise<void> {
   }, "Checking payment status...");
 }
 
+async function createUploadAgent(): Promise<HttpAgent> {
+  const identity = await authClient.getIdentity();
+  return HttpAgent.create({
+    host: window.location.origin,
+    identity,
+    rootKey: canisterEnv?.IC_ROOT_KEY,
+  });
+}
+
 async function deployCurrentOrder(): Promise<void> {
+  const staticSiteDeploy =
+    currentOrder &&
+    !isTopUpOrder(currentOrder) &&
+    isStaticSiteTemplate(currentOrder.templateId);
   const busyLabel =
     currentOrder && isTopUpOrder(currentOrder)
       ? "Applying cycle top-up..."
-      : "Deploying app canister...";
+      : staticSiteDeploy
+        ? "Deploying static site..."
+        : "Deploying app canister...";
   await withBusy(async () => {
     if (!actor || !currentOrder) throw new Error("No deployment order selected.");
     const wasTopUp = isTopUpOrder(currentOrder);
     const targetOrderId = currentOrder.topUpTargetOrderId;
-    currentOrder = unwrapResult(await actor.deployPaidOrder(currentOrder.id));
+    const orderId = currentOrder.id;
+    const uploadFiles = staticSiteFilesByOrderId.get(orderId) || [];
+    if (staticSiteDeploy && uploadFiles.length === 0) {
+      throw new Error(
+        "Project files are no longer available in this browser tab. Choose your files again and create a new order.",
+      );
+    }
+
+    currentOrder = unwrapResult(await actor.deployPaidOrder(orderId));
     await Promise.all([loadOrders(), loadFactoryReadiness()]);
+
+    if (staticSiteDeploy && currentOrder.createdCanisterId) {
+      const agent = await createUploadAgent();
+      await uploadStaticSiteFiles(
+        currentOrder.createdCanisterId.toText(),
+        agent,
+        uploadFiles,
+        (uploaded, total) => {
+          busyMessage = `Uploading site files (${uploaded}/${total})...`;
+          syncBusyDom();
+        },
+      );
+      staticSiteFilesByOrderId.delete(orderId);
+    }
+
     if (wasTopUp && targetOrderId !== undefined) {
       const target = orders.find((order) => order.id === targetOrderId);
       if (target) {
@@ -2340,9 +2533,38 @@ async function deployCurrentOrder(): Promise<void> {
       notice = "Cycle top-up applied to your live app canister.";
     } else {
       await refreshCurrentCycleBalance(true);
-      notice = "The factory installed your app canister.";
+      notice = staticSiteDeploy
+        ? "Your static site is live on the Internet Computer."
+        : "The factory installed your app canister.";
     }
   }, busyLabel);
+}
+
+async function publishLiveStaticSite(): Promise<void> {
+  await withBusy(async () => {
+    if (!signedIn || !currentOrder?.createdCanisterId) {
+      throw new Error("Select a live static site deployment first.");
+    }
+    if (!isStaticSiteTemplate(currentOrder.templateId)) {
+      throw new Error("This deployment is not a static site.");
+    }
+    const filesError = validateStaticSiteFiles(staticSiteLiveFiles);
+    if (filesError) throw new Error(filesError);
+
+    const agent = await createUploadAgent();
+    await uploadStaticSiteFiles(
+      currentOrder.createdCanisterId.toText(),
+      agent,
+      staticSiteLiveFiles,
+      (uploaded, total) => {
+        busyMessage = `Publishing site files (${uploaded}/${total})...`;
+        syncBusyDom();
+      },
+    );
+    staticSiteLiveFiles = [];
+    notice = "Updated files are live on your asset canister.";
+    render();
+  }, "Publishing static site files...");
 }
 
 async function createTopUpOrder(): Promise<void> {

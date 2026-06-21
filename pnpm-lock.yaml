@@ -11,6 +11,9 @@ importers:
       '@icp-sdk/auth':
         specifier: 7.1.0
         version: 7.1.0(@icp-sdk/core@5.4.0)
+      '@icp-sdk/canisters':
+        specifier: 3.5.0
+        version: 3.5.0(@dfinity/utils@4.2.1(@icp-sdk/core@5.4.0))(@icp-sdk/core@5.4.0)
       '@icp-sdk/core':
         specifier: 5.4.0
         version: 5.4.0
@@ -36,6 +39,11 @@ packages:
   '@dfinity/cbor@0.2.3':
     resolution: {integrity: sha512-5GX+9tAf29r94Pxv8nCzrv2/t+AkOfem/c/G61+FA2Wadq7THvc5cvr/AVLH0LpukVfNSWRRHvl1fkCdiB9MMQ==}
 
+  '@dfinity/utils@4.2.1':
+    resolution: {integrity: sha512-5Rd0fflQzBf3h/doVvllJC0X+mrZPwbe6s9qfJm5jyJz07SEkN+cGmqY0HHMPDlCOohZgjDoAG6uwv+6cOMA+w==}
+    peerDependencies:
+      '@icp-sdk/core': ^5
+
   '@emnapi/core@1.10.0':
     resolution: {integrity: sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw==}
 
@@ -53,6 +61,12 @@ packages:
   '@icp-sdk/bindgen@0.4.0':
     resolution: {integrity: sha512-WXJoPIVnqCgFSNcprVpHwPBNWA1prwPh1/ezQYVrCP+Zj8CCJ7zj9L7p5cFcN7ghxoxfbx6tYT8t/HN9fyeYkA==}
     hasBin: true
+
+  '@icp-sdk/canisters@3.5.0':
+    resolution: {integrity: sha512-hlIWGiwW8GM8lCpAENG8aymo576GtLcLloxNtLnIaMBe/ih8oytjqEvv2w5QYp7kbSnvZK7MaXbJlkVUrUUwzw==}
+    peerDependencies:
+      '@dfinity/utils': ^4.1
+      '@icp-sdk/core': ^5
 
   '@icp-sdk/core@5.4.0':
     resolution: {integrity: sha512-yedhCkHIhCxI65W8id99Mi8fUgSyqKSTbD57AphquNcFV2/3Rjykng0/6H08mHswKydDcv6Y0+e8aPdrznewCw==}
@@ -199,6 +213,13 @@ packages:
   asn1js@3.0.10:
     resolution: {integrity: sha512-S2s3aOytiKdFRdulw2qPE51MzjzVOisppcVv7jVFR+Kw0kxwvFrDcYA0h7Ndqbmj0HkMIXYWaoj7fli8kgx1eg==}
     engines: {node: '>=12.0.0'}
+
+  base58-js@3.0.3:
+    resolution: {integrity: sha512-3hf42BysHnUqmZO7mK6e5X/hs1AvyEJIhdVLbG/Mxn/fhFnhGxOO37mWbMHg1RT4TxqcPKXgqj9/bp1YG0GBXA==}
+    engines: {node: '>=16.0.0', npm: '>=7.0.0'}
+
+  bech32@2.0.0:
+    resolution: {integrity: sha512-LcknSilhIGatDAsY1ak2I8VtGaHNhgMSYVxFrGLXv+xLHytaKZKcaUJJUE7qmBr7h33o5YQwP55pMI0xmkpJwg==}
 
   body-parser@2.2.2:
     resolution: {integrity: sha512-oP5VkATKlNwcgvxi0vM0p/D3n2C3EReYVX+DNYs5TjZFn/oQt2j+4sVJtSMr18pdRr8wjTcBl6LoV+FUwzPmNA==}
@@ -455,6 +476,11 @@ packages:
     resolution: {integrity: sha512-Lbgzdk0h4juoQ9fCKXW4by0UJqj+nOOrI9MJ1sSj4nI8aI2eo1qmvQEie4VD1glsS250n15LsWsYtCugiStS5A==}
     engines: {node: '>=18'}
 
+  mime@3.0.0:
+    resolution: {integrity: sha512-jSCU7/VB1loIWBZe14aEYHU/+1UMEHoaO7qxCOVJOw9GgH72VAWppxNcjU+x9a2k3GSIBXNKxXQFqRvvZ7vr3A==}
+    engines: {node: '>=10.0.0'}
+    hasBin: true
+
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
@@ -647,6 +673,10 @@ snapshots:
 
   '@dfinity/cbor@0.2.3': {}
 
+  '@dfinity/utils@4.2.1(@icp-sdk/core@5.4.0)':
+    dependencies:
+      '@icp-sdk/core': 5.4.0
+
   '@emnapi/core@1.10.0':
     dependencies:
       '@emnapi/wasi-threads': 1.2.1
@@ -672,6 +702,15 @@ snapshots:
   '@icp-sdk/bindgen@0.4.0':
     dependencies:
       commander: 14.0.3
+
+  '@icp-sdk/canisters@3.5.0(@dfinity/utils@4.2.1(@icp-sdk/core@5.4.0))(@icp-sdk/core@5.4.0)':
+    dependencies:
+      '@dfinity/utils': 4.2.1(@icp-sdk/core@5.4.0)
+      '@icp-sdk/core': 5.4.0
+      '@noble/hashes': 1.8.0
+      base58-js: 3.0.3
+      bech32: 2.0.0
+      mime: 3.0.0
 
   '@icp-sdk/core@5.4.0':
     dependencies:
@@ -784,6 +823,10 @@ snapshots:
       pvtsutils: 1.3.6
       pvutils: 1.1.5
       tslib: 2.8.1
+
+  base58-js@3.0.3: {}
+
+  bech32@2.0.0: {}
 
   body-parser@2.2.2:
     dependencies:
@@ -1016,6 +1059,8 @@ snapshots:
   mime-types@3.0.2:
     dependencies:
       mime-db: 1.54.0
+
+  mime@3.0.0: {}
 
   ms@2.1.3: {}
 

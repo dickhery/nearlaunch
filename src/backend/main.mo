@@ -13,10 +13,8 @@ import Text "mo:core/Text";
 import Time "mo:core/Time";
 import Pricing "lib/Pricing";
 import Validation "lib/Validation";
-import UpgradeMigration "UpgradeMigration";
 import Types "../shared/Types";
 
-(with migration = UpgradeMigration.run)
 shared (install) actor class LauncherBackend() {
   let owner = do {
     if (install.caller.isAnonymous()) {
@@ -63,12 +61,12 @@ shared (install) actor class LauncherBackend() {
       },
     );
     registry.add(
-      "grant",
+      "static-site",
       {
-        id = "grant";
-        name = "Grant project page";
-        description = "A public project brief for milestones, traction, and funding goals.";
-        category = "Ecosystem";
+        id = "static-site";
+        name = "Static site";
+        description = "Upload your own HTML, CSS, JavaScript, and assets to host a certified static website on ICP.";
+        category = "Custom";
         basePriceUsdCents = 500;
         active = true;
       },
@@ -268,7 +266,13 @@ shared (install) actor class LauncherBackend() {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
-    switch (Validation.appConfig(request.config)) {
+    switch (
+      if (request.templateId == "static-site") {
+        Validation.staticSiteConfig(request.config);
+      } else {
+        Validation.appConfig(request.config);
+      }
+    ) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
@@ -290,7 +294,11 @@ shared (install) actor class LauncherBackend() {
     } catch (error) {
       return #err("Deployment factory is unavailable: " # error.message());
     };
-    if (not readiness.templateWasmConfigured) {
+    if (request.templateId == "static-site") {
+      if (not readiness.assetWasmConfigured) {
+        return #err("Deployment is temporarily unavailable while the asset canister Wasm is configured.");
+      };
+    } else if (not readiness.templateWasmConfigured) {
       return #err("Deployment is temporarily unavailable while the app template is configured.");
     };
     if (not readiness.canDeploy) {
@@ -844,7 +852,11 @@ shared (install) actor class LauncherBackend() {
             status = #Live;
             expectedCycles = deploymentCycles;
             createdCanisterId = ?canisterId;
-            appUrl = ?("https://" # canisterId.toText() # ".raw.icp0.io");
+            appUrl = if (order.templateId == "static-site") {
+              ?("https://" # canisterId.toText() # ".icp0.io");
+            } else {
+              ?("https://" # canisterId.toText() # ".raw.icp0.io");
+            };
             error = null;
           };
           orders.add(orderId, live);
@@ -884,6 +896,10 @@ shared (install) actor class LauncherBackend() {
     let canisterId = switch (order.createdCanisterId) {
       case (?value) value;
       case (null) return #err("This live deployment is missing its app canister ID.");
+    };
+
+    if (order.templateId == "static-site") {
+      return #err("Static sites are updated by uploading files directly to the asset canister.");
     };
 
     let resolvedConfig = Validation.resolveAppConfigForUpdate(order.config, config);

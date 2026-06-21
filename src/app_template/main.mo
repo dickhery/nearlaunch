@@ -84,7 +84,6 @@ shared (install) actor class GeneratedApp(init : Types.ChildInit) {
     switch (templateId) {
       case ("portfolio") "Independent work, permanently online";
       case ("startup") "A new product, launched on ICP";
-      case ("grant") "Open milestones, public progress";
       case (_) "Deployed on the Internet Computer";
     };
   };
@@ -93,7 +92,6 @@ shared (install) actor class GeneratedApp(init : Types.ChildInit) {
     switch (templateId) {
       case ("portfolio") "Owner-managed ICP portfolio";
       case ("startup") "Owner-managed ICP landing page";
-      case ("grant") "Owner-managed ICP grant page";
       case (_) "Deployed on the Internet Computer";
     };
   };

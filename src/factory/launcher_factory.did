@@ -94,6 +94,8 @@ type FactoryReadiness = record {
   requiredCycles : nat;
   templateWasmConfigured : bool;
   templateWasmSize : nat;
+  assetWasmConfigured : bool;
+  assetWasmSize : nat;
   canDeploy : bool;
 };
 
@@ -111,10 +113,14 @@ service : () -> {
   getDeployment : (nat) -> (opt FactoryDeployment) query;
   getOwner : () -> (principal) query;
   getReadiness : (nat) -> (FactoryReadiness) query;
+  getAssetWasmInfo : () -> (
+    record { configured : bool; hash : opt blob; size : nat }
+  ) query;
   getTemplateWasmInfo : () -> (
     record { configured : bool; hash : opt blob; size : nat }
   ) query;
   topUpChild : (FactoryTopUpRequest) -> (ResultUnit);
   updateDeployment : (FactoryUpdateRequest) -> (FactoryUpdateResult);
+  uploadAssetCanisterWasm : (blob, blob) -> (ResultUnit);
   uploadTemplateWasm : (blob, blob) -> (ResultUnit);
 }

@@ -321,6 +321,19 @@ module {
     #ok(());
   };
 
+  public func staticSiteConfig(config : Types.AppConfig) : Result.Result<(), Text> {
+    if (config.name.size() < 2 or config.name.size() > 80) {
+      return #err("Site name must be between 2 and 80 characters.");
+    };
+    if (config.headline.size() > 140) {
+      return #err("Site summary must be 140 characters or fewer.");
+    };
+    if (config.description.size() > 1_200) {
+      return #err("Site description must be 1,200 characters or fewer.");
+    };
+    #ok(());
+  };
+
   public func appConfig(config : Types.AppConfig) : Result.Result<(), Text> {
     if (appConfigTextSize(config) > MAX_CONFIG_TEXT_LENGTH) {
       return #err("App content is too large. Use smaller uploaded images or fewer project images.");
