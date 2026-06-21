@@ -13,8 +13,10 @@ import Text "mo:core/Text";
 import Time "mo:core/Time";
 import Pricing "lib/Pricing";
 import Validation "lib/Validation";
+import UpgradeMigration "UpgradeMigration";
 import Types "../shared/Types";
 
+(with migration = UpgradeMigration.run)
 shared (install) actor class LauncherBackend() {
   let owner = do {
     if (install.caller.isAnonymous()) {
@@ -98,8 +100,10 @@ shared (install) actor class LauncherBackend() {
 
   transient let factory : actor {
     deployOrder : shared Types.FactoryDeployRequest -> async Types.FactoryDeployResult;
+    topUpChild : shared Types.FactoryTopUpRequest -> async Result.Result<(), Text>;
     updateDeployment : shared Types.FactoryUpdateRequest -> async Types.FactoryUpdateResult;
     getReadiness : shared query Nat -> async Types.FactoryReadiness;
+    getChildCycleStatus : shared Principal -> async Types.ChildCycleStatus;
   } = actor (factoryCanisterId);
 
   transient let ic : actor {
@@ -163,6 +167,23 @@ shared (install) actor class LauncherBackend() {
     Nat.min(limit, 50);
   };
 
+  func isTopUpOrder(order : Types.DeploymentOrder) : Bool {
+    switch (order.orderKind) {
+      case (?#TopUp) true;
+      case (?#Deploy) false;
+      case (null) {
+        switch (order.topUpTargetOrderId) {
+          case (?_) true;
+          case (null) false;
+        };
+      };
+    };
+  };
+
+  func isDeployOrder(order : Types.DeploymentOrder) : Bool {
+    not isTopUpOrder(order);
+  };
+
   func randomToken(random : Blob) : Text {
     var token = "";
     for (byte in random.vals()) {
@@ -214,31 +235,36 @@ shared (install) actor class LauncherBackend() {
 
   public query func quoteDeployment(
     templateId : Text,
-    fundingMonths : Nat,
   ) : async Result.Result<Types.PricingBreakdown, Text> {
     switch (Pricing.validate(pricingConfig)) {
       case (?message) return #err("Pricing configuration requires admin attention: " # message);
       case (null) {};
     };
-    switch (Validation.fundingMonths(fundingMonths)) {
-      case (#err(message)) return #err(message);
-      case (#ok(())) {};
-    };
     let template = switch (templates.get(templateId)) {
       case (null) return #err("Template not found.");
       case (?value) value;
     };
-    #ok(Pricing.quote(pricingConfig, template, fundingMonths));
+    #ok(Pricing.quoteDeploy(pricingConfig, template));
+  };
+
+  public query func quoteTopUp(
+    topUpCycles : Nat,
+  ) : async Result.Result<Types.PricingBreakdown, Text> {
+    switch (Pricing.validate(pricingConfig)) {
+      case (?message) return #err("Pricing configuration requires admin attention: " # message);
+      case (null) {};
+    };
+    switch (Validation.topUpCycles(topUpCycles)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    #ok(Pricing.quoteTopUp(pricingConfig, topUpCycles));
   };
 
   public shared ({ caller }) func createDeploymentOrder(
     request : Types.CreateOrderRequest
   ) : async Result.Result<Types.DeploymentOrder, Text> {
     switch (Validation.requireAuthenticated(caller)) {
-      case (#err(message)) return #err(message);
-      case (#ok(())) {};
-    };
-    switch (Validation.fundingMonths(request.fundingMonths)) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
@@ -258,7 +284,7 @@ shared (install) actor class LauncherBackend() {
     };
     if (not template.active) return #err("Template is currently unavailable.");
 
-    let price = Pricing.quote(pricingConfig, template, request.fundingMonths);
+    let price = Pricing.quoteDeploy(pricingConfig, template);
     let readiness = try {
       await factory.getReadiness(price.initialCycles);
     } catch (error) {
@@ -276,7 +302,7 @@ shared (install) actor class LauncherBackend() {
       owner = caller;
       templateId = request.templateId;
       config = request.config;
-      fundingMonths = request.fundingMonths;
+      fundingMonths = 0;
       status = #AwaitingPayment;
       requestedAt = Time.now();
       expectedAmountUsdCents = price.totalUsdCents;
@@ -290,11 +316,119 @@ shared (install) actor class LauncherBackend() {
       createdCanisterId = null;
       appUrl = null;
       error = null;
+      orderKind = ?#Deploy;
+      topUpTargetOrderId = null;
     };
 
     orders.add(nextOrderId, order);
     nextOrderId += 1;
     #ok(order);
+  };
+
+  public shared ({ caller }) func createTopUpOrder(
+    request : Types.CreateTopUpOrderRequest,
+  ) : async Result.Result<Types.DeploymentOrder, Text> {
+    switch (Validation.requireAuthenticated(caller)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    switch (Validation.topUpCycles(request.topUpCycles)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+    if (not ordersEnabled) return #err("New top-up orders are temporarily paused.");
+    switch (Pricing.validate(pricingConfig)) {
+      case (?message) return #err("Pricing configuration requires admin attention: " # message);
+      case (null) {};
+    };
+
+    let target = getOrderOrTrap(request.targetOrderId);
+    if (caller != target.owner) return #err("Caller does not own the target deployment.");
+    if (target.status != #Live) return #err("Only live apps can receive cycle top-ups.");
+    if (isTopUpOrder(target)) return #err("Top-up orders cannot be topped up.");
+    let canisterId = switch (target.createdCanisterId) {
+      case (?value) value;
+      case (null) return #err("Target deployment is missing its app canister ID.");
+    };
+
+    let price = Pricing.quoteTopUp(pricingConfig, request.topUpCycles);
+    let readiness = try {
+      await factory.getReadiness(request.topUpCycles);
+    } catch (error) {
+      return #err("Deployment factory is unavailable: " # error.message());
+    };
+    if (not readiness.canDeploy) {
+      return #err("Top-up is temporarily unavailable because the factory needs more cycles.");
+    };
+
+    let topUpConfig : Types.AppConfig = {
+      name = "Cycle top-up for " # target.config.name;
+      headline = "Cycle top-up";
+      description = "Adds cycles to a live NearLaunch deployment.";
+      accentColor = target.config.accentColor;
+      primaryLink = "";
+      contact = "";
+      about = null;
+      heroImageUrl = null;
+      resumeUrl = null;
+      skills = null;
+      socialLinks = null;
+      projects = null;
+    };
+
+    let order : Types.DeploymentOrder = {
+      id = nextOrderId;
+      owner = caller;
+      templateId = target.templateId;
+      config = topUpConfig;
+      fundingMonths = 0;
+      status = #AwaitingPayment;
+      requestedAt = Time.now();
+      expectedAmountUsdCents = price.totalUsdCents;
+      expectedSettlementAmount = Pricing.toSmallestUnits(price.totalUsdCents, settlementConfig.decimals);
+      expectedCycles = request.topUpCycles;
+      settlementAsset = settlementConfig.assetId;
+      paymentQuoteId = null;
+      depositAddress = null;
+      paymentTxHash = null;
+      settlementProof = null;
+      createdCanisterId = ?canisterId;
+      appUrl = target.appUrl;
+      error = null;
+      orderKind = ?#TopUp;
+      topUpTargetOrderId = ?request.targetOrderId;
+    };
+
+    orders.add(nextOrderId, order);
+    nextOrderId += 1;
+    #ok(order);
+  };
+
+  public shared ({ caller }) func getCanisterCycleBalance(
+    orderId : Nat,
+  ) : async Result.Result<Types.ChildCycleStatus, Text> {
+    switch (Validation.requireAuthenticated(caller)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+
+    let order = switch (orders.get(orderId)) {
+      case (?value) value;
+      case (null) return #err("Deployment order not found.");
+    };
+    if (caller != order.owner) return #err("Caller does not own this deployment.");
+    if (order.status != #Live) return #err("Cycle balance is only available for live apps.");
+    if (isTopUpOrder(order)) return #err("Top-up orders do not have their own canister balance.");
+    let canisterId = switch (order.createdCanisterId) {
+      case (?value) value;
+      case (null) return #err("This deployment is missing its app canister ID.");
+    };
+
+    try {
+      #ok(await factory.getChildCycleStatus(canisterId));
+    } catch (error) {
+      #err("Could not read canister cycle balance: " # error.message());
+    };
   };
 
   public shared ({ caller }) func cancelDeploymentOrder(
@@ -633,56 +767,101 @@ shared (install) actor class LauncherBackend() {
     };
     if (order.status == #Live) return #ok(order);
     if (order.status != #PaymentDetected and order.status != #Failed) {
-      return #err("Order is not ready for deployment.");
+      return #err("Order is not ready for fulfillment.");
     };
 
-    let deploying = {
-      order with
-      status = #CreatingCanister;
-      error = null;
-    };
-    orders.add(orderId, deploying);
-
-    let deploymentCycles = Nat.max(Pricing.MIN_CHILD_CYCLES, order.expectedCycles);
-    let factoryResult = try {
-      await factory.deployOrder({
-        orderId;
-        owner = order.owner;
-        templateId = order.templateId;
-        config = order.config;
-        initialCycles = deploymentCycles;
-      });
-    } catch (error) {
-      #err({
-        message = "Factory call failed: " # error.message();
-        canisterId = order.createdCanisterId;
-      });
-    };
-
-    switch (factoryResult) {
-      case (#ok(canisterId)) {
-        let live = {
-          deploying with
-          status = #Live;
-          expectedCycles = deploymentCycles;
-          createdCanisterId = ?canisterId;
-          appUrl = ?("https://" # canisterId.toText() # ".raw.icp0.io");
-          error = null;
-        };
-        orders.add(orderId, live);
-        liveAppCount += 1;
-        #ok(live);
+    if (isTopUpOrder(order)) {
+      let targetCanisterId = switch (order.createdCanisterId) {
+        case (?value) value;
+        case (null) return #err("Top-up order is missing its target canister ID.");
       };
-      case (#err(failure)) {
-        let failed = {
-          deploying with
-          status = #Failed;
-          expectedCycles = deploymentCycles;
-          createdCanisterId = failure.canisterId;
-          error = ?failure.message;
+      let fulfilling = {
+        order with
+        status = #CreatingCanister;
+        error = null;
+      };
+      orders.add(orderId, fulfilling);
+
+      let topUpResult = try {
+        await factory.topUpChild({
+          orderId;
+          owner = order.owner;
+          canisterId = targetCanisterId;
+          cycles = order.expectedCycles;
+        });
+      } catch (error) {
+        #err("Factory top-up call failed: " # error.message());
+      };
+
+      switch (topUpResult) {
+        case (#err(message)) {
+          let failed = {
+            fulfilling with
+            status = #Failed;
+            error = ?message;
+          };
+          orders.add(orderId, failed);
+          #err(message);
         };
-        orders.add(orderId, failed);
-        #err(failure.message);
+        case (#ok(())) {
+          let live = {
+            fulfilling with
+            status = #Live;
+            error = null;
+          };
+          orders.add(orderId, live);
+          #ok(live);
+        };
+      };
+    } else {
+      let deploying = {
+        order with
+        status = #CreatingCanister;
+        error = null;
+      };
+      orders.add(orderId, deploying);
+
+      let deploymentCycles = Pricing.resolveInitialDeployCycles(pricingConfig);
+      let factoryResult = try {
+        await factory.deployOrder({
+          orderId;
+          owner = order.owner;
+          templateId = order.templateId;
+          config = order.config;
+          initialCycles = deploymentCycles;
+        });
+      } catch (error) {
+        #err({
+          message = "Factory call failed: " # error.message();
+          canisterId = order.createdCanisterId;
+        });
+      };
+
+      switch (factoryResult) {
+        case (#ok(canisterId)) {
+          let live = {
+            deploying with
+            status = #Live;
+            expectedCycles = deploymentCycles;
+            createdCanisterId = ?canisterId;
+            appUrl = ?("https://" # canisterId.toText() # ".raw.icp0.io");
+            error = null;
+          };
+          orders.add(orderId, live);
+          liveAppCount += 1;
+          #ok(live);
+        };
+        case (#err(failure)) {
+          let failed = {
+            deploying with
+            status = #Failed;
+            expectedCycles = deploymentCycles;
+            createdCanisterId = failure.canisterId;
+            error = ?failure.message;
+          };
+          orders.add(orderId, failed);
+          #err(failure.message);
+        };
       };
     };
   };
@@ -764,7 +943,11 @@ shared (install) actor class LauncherBackend() {
     let cappedLimit = pageLimit(limit);
     var matched : Nat = 0;
     label scan for (order in orders.values()) {
-      if (order.owner == caller and not canceledOrders.contains(order.id)) {
+      if (
+        order.owner == caller and
+        not canceledOrders.contains(order.id) and
+        isDeployOrder(order)
+      ) {
         if (matched >= offset and results.size() < cappedLimit) results.add(order);
         matched += 1;
         if (results.size() >= cappedLimit) break scan;
@@ -856,6 +1039,26 @@ shared (install) actor class LauncherBackend() {
       case (null) {};
     };
     pricingConfig := config;
+    #ok(());
+  };
+
+  public shared ({ caller }) func setUsdPerTrillionCents(
+    usdPerTrillionCents : Nat,
+  ) : async Result.Result<(), Text> {
+    if (caller != settlementRelayer) {
+      requireAdmin(caller);
+    };
+    if (usdPerTrillionCents == 0 or usdPerTrillionCents > 1_000_000) {
+      return #err("USD per trillion cycles rate is invalid.");
+    };
+    pricingConfig := {
+      pricingConfig with
+      usdPerTrillionCents = ?usdPerTrillionCents;
+    };
+    switch (Pricing.validate(pricingConfig)) {
+      case (?message) return #err(message);
+      case (null) {};
+    };
     #ok(());
   };
 

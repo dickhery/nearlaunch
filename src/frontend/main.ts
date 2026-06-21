@@ -4,8 +4,10 @@ import { Principal } from "@icp-sdk/core/principal";
 import {
   createActor,
   type AdminAccess,
+  type ChildCycleStatus,
   type DeploymentOrder,
   DeploymentStatus,
+  OrderKind,
   type PricingBreakdown,
   type PublicConfig,
   type ResultOrder,
@@ -71,6 +73,14 @@ type RelayerHealth = {
   backendError?: string;
 };
 
+type CyclesRate = {
+  usdPerTrillionCents: number;
+  icpUsd?: number | null;
+  source?: string;
+  fetchedAt?: number;
+  syncedToBackend?: boolean;
+};
+
 const app = document.querySelector<HTMLDivElement>("#app") as HTMLDivElement;
 const isLocalFrontend =
   window.location.hostname === "localhost" ||
@@ -84,7 +94,15 @@ const RELAYER_URL =
 const canisterEnv = safeGetCanisterEnv();
 const backendCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_backend"];
 const factoryCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_factory"];
-const MIN_CHILD_CYCLES = 1_000_000_000_000n;
+const TRILLION_CYCLES = 1_000_000_000_000n;
+const INITIAL_DEPLOY_CYCLES = 2n * TRILLION_CYCLES;
+const MIN_TOP_UP_CYCLES = 100_000_000_000n;
+const MAX_TOP_UP_CYCLES = 3n * TRILLION_CYCLES;
+const TOP_UP_PRESETS = [
+  500_000_000_000n,
+  TRILLION_CYCLES,
+  2n * TRILLION_CYCLES,
+] as const;
 const MAX_INLINE_IMAGE_LENGTH = 450_000;
 const MAX_IMAGE_SOURCE_BYTES = 8_000_000;
 const MAX_IMAGE_WIDTH = 1600;
@@ -101,7 +119,11 @@ let principal = "";
 let templates: Template[] = [];
 let orders: DeploymentOrder[] = [];
 let selectedTemplate = "portfolio";
-let selectedFundingMonths = 3;
+let selectedTopUpCycles = TRILLION_CYCLES;
+let deployBreakdown: PricingBreakdown | null = null;
+let topUpBreakdown: PricingBreakdown | null = null;
+let cycleBalances = new Map<string, ChildCycleStatus>();
+let cyclesRate: CyclesRate | null = null;
 let currentOrder: DeploymentOrder | null = null;
 let currentQuote: QuoteView | null = null;
 let tokens: Token[] = [];
@@ -579,42 +601,35 @@ function activeTemplate(): Template | undefined {
   return templates.find((template) => template.id === selectedTemplate);
 }
 
-function pricingBreakdown(
-  template: Template | undefined,
-  fundingMonths: number,
+function configuredInitialDeployCycles(): bigint {
+  return publicConfig?.pricing.initialDeployCycles ?? INITIAL_DEPLOY_CYCLES;
+}
+
+function configuredMarkupBps(): bigint {
+  return publicConfig?.pricing.cyclesMarkupBps ?? 5_000n;
+}
+
+function isTopUpOrder(order: DeploymentOrder): boolean {
+  return order.orderKind === OrderKind.TopUp;
+}
+
+function unwrapPricing(
+  result: { __kind__: "ok"; ok: PricingBreakdown } | { __kind__: "err"; err: string },
 ): PricingBreakdown | null {
-  if (!template || !publicConfig) return null;
-  const fundingUsdCents =
-    BigInt(fundingMonths) * publicConfig.pricing.monthlyFundingUsdCents;
-  const configuredCycles =
-    publicConfig.pricing.creationCycles +
-    publicConfig.pricing.cycleBuffer +
-    BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles;
-  return {
-    templateUsdCents: template.basePriceUsdCents,
-    serviceFeeUsdCents: publicConfig.pricing.serviceFeeUsdCents,
-    fundingUsdCents,
-    totalUsdCents:
-      template.basePriceUsdCents +
-      publicConfig.pricing.serviceFeeUsdCents +
-      fundingUsdCents,
-    initialCycles: childCycleTarget(configuredCycles),
-  };
+  if (result.__kind__ === "err") return null;
+  return result.ok;
 }
 
-function configuredPlanCycles(fundingMonths: number): bigint {
-  if (!publicConfig) return 0n;
-  return childCycleTarget(
-    publicConfig.pricing.creationCycles +
-      publicConfig.pricing.cycleBuffer +
-      BigInt(fundingMonths) * publicConfig.pricing.monthlyCycles,
-  );
+function markupPercentLabel(): string {
+  return `${(Number(configuredMarkupBps()) / 100).toFixed(0)}%`;
 }
 
-function childCycleTarget(configuredCycles: bigint): bigint {
-  return configuredCycles < MIN_CHILD_CYCLES
-    ? MIN_CHILD_CYCLES
-    : configuredCycles;
+function daysOfRuntime(balance: bigint, burnPerDay: bigint): string {
+  if (burnPerDay === 0n) return "stable";
+  const days = balance / burnPerDay;
+  if (days >= 365n) return `${(Number(days) / 365).toFixed(1)} years`;
+  if (days >= 1n) return `${days.toString()} days`;
+  return "less than a day";
 }
 
 function settlementLabel(order: DeploymentOrder): string {
@@ -676,55 +691,36 @@ function relayerReadyForOrders(): boolean {
   return relayerHealth?.ready === true;
 }
 
-function factoryBalanceRequired(fundingMonths: number): bigint | null {
-  if (!publicConfig || !factoryReadiness) return null;
-  return configuredPlanCycles(fundingMonths) + factoryReadiness.reserveCycles;
-}
-
-function factoryShortfall(fundingMonths: number): bigint | null {
-  const required = factoryBalanceRequired(fundingMonths);
-  if (required === null || !factoryReadiness) return null;
+function factoryDeployShortfall(): bigint | null {
+  if (!factoryReadiness) return null;
+  const required = configuredInitialDeployCycles() + factoryReadiness.reserveCycles;
   return required > factoryReadiness.cycleBalance
     ? required - factoryReadiness.cycleBalance
     : 0n;
 }
 
-function supportedFundingMonths(): number[] {
-  if (!factoryReadiness?.templateWasmConfigured) return [];
-  return [1, 3, 6].filter((months) => factoryShortfall(months) === 0n);
+function factoryTopUpShortfall(amount = selectedTopUpCycles): bigint | null {
+  if (!factoryReadiness) return null;
+  const required = amount + factoryReadiness.reserveCycles;
+  return required > factoryReadiness.cycleBalance
+    ? required - factoryReadiness.cycleBalance
+    : 0n;
 }
 
-function factoryPlanAvailable(fundingMonths: number): boolean {
-  return supportedFundingMonths().includes(fundingMonths);
+function factoryCanDeploy(): boolean {
+  return factoryReadiness?.templateWasmConfigured === true &&
+    factoryReadiness.canDeploy === true;
 }
 
 function factoryCapacityMessage(): string | null {
-  if (!factoryReadiness || !publicConfig) return null;
+  if (!factoryReadiness) return null;
   if (!factoryReadiness.templateWasmConfigured) {
     return "Deployments are paused until the approved app template Wasm is uploaded.";
   }
 
-  const supported = supportedFundingMonths();
-  const oneMonthShortfall = factoryShortfall(1);
-  const threeMonthShortfall = factoryShortfall(3);
-  const sixMonthShortfall = factoryShortfall(6);
-
-  if (supported.length === 0 && oneMonthShortfall !== null) {
-    return `Deployments are paused. Add at least ${cycles(oneMonthShortfall)} cycles to support the one-month plan. Current factory balance: ${cycles(factoryReadiness.cycleBalance)}.`;
-  }
-  if (supported.length < 3) {
-    const planLabel = supported
-      .map((months) => `${months}-month`)
-      .join(" and ");
-    const upgrades = [
-      threeMonthShortfall && threeMonthShortfall > 0n
-        ? `${cycles(threeMonthShortfall)} for three-month plans`
-        : "",
-      sixMonthShortfall && sixMonthShortfall > 0n
-        ? `${cycles(sixMonthShortfall)} for six-month plans`
-        : "",
-    ].filter(Boolean);
-    return `Factory capacity currently supports ${planLabel} plans. Add ${upgrades.join(" or ")}. Current balance: ${cycles(factoryReadiness.cycleBalance)}; the ${cycles(factoryReadiness.reserveCycles)} deployment reserve is included in these targets.`;
+  const deployShortfall = factoryDeployShortfall();
+  if (deployShortfall !== null && deployShortfall > 0n) {
+    return `Deployments are paused. Add at least ${cycles(deployShortfall)} cycles to the factory. Current balance: ${cycles(factoryReadiness.cycleBalance)}.`;
   }
   return null;
 }
@@ -778,15 +774,14 @@ function renderAvailability(): string {
 }
 
 function renderTemplateCards(): string {
-  const pricing = publicConfig?.pricing;
   return templates
     .filter((template) => template.active)
     .map((template, index) => {
-      const minimum = pricing
-        ? template.basePriceUsdCents +
-          pricing.serviceFeeUsdCents +
-          pricing.monthlyFundingUsdCents
-        : template.basePriceUsdCents;
+      const minimum =
+        template.id === selectedTemplate && deployBreakdown
+          ? deployBreakdown.totalUsdCents
+          : template.basePriceUsdCents +
+            (publicConfig?.pricing.serviceFeeUsdCents || 0n);
       return `
         <button class="template-card ${template.id === selectedTemplate ? "selected" : ""}"
           data-template="${html(template.id)}" type="button">
@@ -801,19 +796,96 @@ function renderTemplateCards(): string {
     .join("");
 }
 
-function renderPriceBreakdown(
-  template: Template | undefined,
-  fundingMonths: number,
-): string {
-  const breakdown = pricingBreakdown(template, fundingMonths);
+function renderDeployPriceBreakdown(breakdown: PricingBreakdown | null): string {
   if (!breakdown || !publicConfig) return "";
   return `
     <div class="pricing-breakdown">
       <div><span>Template</span><strong>${money(breakdown.templateUsdCents)}</strong></div>
       <div><span>Deployment service</span><strong>${money(breakdown.serviceFeeUsdCents)}</strong></div>
-      <div><span>${fundingMonths} month${fundingMonths === 1 ? "" : "s"} of cycles</span><strong>${money(breakdown.fundingUsdCents)}</strong></div>
-      <div class="pricing-total"><span>Fixed plan total</span><strong>${money(breakdown.totalUsdCents)} ${html(publicConfig.paymentDisplay.priceCurrency)}</strong></div>
-      <p>This is the plan price. Your NEAR Intents quote tells you the exact amount of the source token to send.</p>
+      <div><span>Starter cycles (${cycles(breakdown.initialCycles)})</span><strong>${money(breakdown.cyclesBaseUsdCents + breakdown.cyclesMarkupUsdCents)}</strong></div>
+      <div><span>Platform markup (${html(markupPercentLabel())})</span><strong>${money(breakdown.cyclesMarkupUsdCents)}</strong></div>
+      <div class="pricing-total"><span>Deploy total</span><strong>${money(breakdown.totalUsdCents)} ${html(publicConfig.paymentDisplay.priceCurrency)}</strong></div>
+      <p>Every new app starts with ${cycles(breakdown.initialCycles)} cycles. Top up later when your balance runs low.</p>
+    </div>
+  `;
+}
+
+function renderTopUpPriceBreakdown(breakdown: PricingBreakdown | null): string {
+  if (!breakdown || !publicConfig) return "";
+  return `
+    <div class="pricing-breakdown">
+      <div><span>Cycle purchase (${cycles(breakdown.initialCycles)})</span><strong>${money(breakdown.cyclesBaseUsdCents)}</strong></div>
+      <div><span>Platform markup (${html(markupPercentLabel())})</span><strong>${money(breakdown.cyclesMarkupUsdCents)}</strong></div>
+      <div class="pricing-total"><span>Top-up total</span><strong>${money(breakdown.totalUsdCents)} ${html(publicConfig.paymentDisplay.priceCurrency)}</strong></div>
+      <p>${cycles(breakdown.initialCycles)} cycles are deposited into your app canister after payment settles.</p>
+    </div>
+  `;
+}
+
+function renderCycleBalancePanel(order: DeploymentOrder): string {
+  const balance = cycleBalances.get(order.id.toString());
+  if (!balance) {
+    return `
+      <div class="cycle-balance-panel">
+        <span class="section-label">Canister cycles</span>
+        <p class="muted">Loading live cycle balance...</p>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="cycle-balance-panel">
+      <div class="cycle-balance-heading">
+        <span class="section-label">Canister cycles</span>
+        <button class="text-button" id="refresh-cycle-balance" type="button">Refresh</button>
+      </div>
+      <div class="cycle-balance-grid">
+        <div><small>Current balance</small><strong>${cycles(balance.cycles)}</strong></div>
+        <div><small>Daily burn (idle)</small><strong>${cycles(balance.idleCyclesBurnedPerDay)}</strong></div>
+        <div><small>Estimated runway</small><strong>${html(daysOfRuntime(balance.cycles, balance.idleCyclesBurnedPerDay))}</strong></div>
+      </div>
+      <p class="field-help">Top up before the balance gets too low. Pricing uses the current ICP market rate plus a ${html(markupPercentLabel())} platform fee.</p>
+    </div>
+  `;
+}
+
+function renderTopUpPanel(order: DeploymentOrder): string {
+  if (order.status !== "Live" || isTopUpOrder(order)) return "";
+  const shortfall = factoryTopUpShortfall();
+  const canTopUp =
+    signedIn &&
+    publicConfig?.ordersEnabled &&
+    paymentConfigMatches() &&
+    relayerReadyForOrders() &&
+    shortfall === 0n &&
+    !busy;
+
+  return `
+    <div class="top-up-panel">
+      <div class="top-up-heading">
+        <span class="section-label">Top up cycles</span>
+        <span class="muted">${cyclesRate ? `Rate: ${money(BigInt(cyclesRate.usdPerTrillionCents))} / T` : "Fetching market rate..."}</span>
+      </div>
+      <div class="top-up-options">
+        ${TOP_UP_PRESETS.map(
+          (amount) => `
+            <input id="topup-${amount.toString()}" type="radio" name="topUpCycles" value="${amount.toString()}" ${amount === selectedTopUpCycles ? "checked" : ""}>
+            <label for="topup-${amount.toString()}">${cycles(amount)}<small>cycles</small></label>
+          `,
+        ).join("")}
+      </div>
+      <div id="topup-pricing-breakdown">${renderTopUpPriceBreakdown(topUpBreakdown)}</div>
+      <button class="button secondary wide" id="create-topup-button" type="button" ${canTopUp ? "" : "disabled"}>
+        ${
+          !signedIn
+            ? "Sign in to top up"
+            : !publicConfig?.ordersEnabled
+              ? "Top-ups are paused"
+              : shortfall && shortfall > 0n
+                ? "Factory needs more cycles"
+                : "Create top-up order"
+        }
+      </button>
     </div>
   `;
 }
@@ -1090,6 +1162,7 @@ function renderCurrentOrder(): string {
   }
 
   const status = currentOrder.status;
+  const topUpOrder = isTopUpOrder(currentOrder);
   const canQuote = status === "AwaitingPayment" && !currentQuote;
   const canDeploy = status === "PaymentDetected" || status === "Failed";
   const liveAppUrl = appUrl(currentOrder);
@@ -1105,18 +1178,32 @@ function renderCurrentOrder(): string {
       currentOrder.depositAddress ||
       currentQuote,
   );
+  const targetOrder =
+    topUpOrder && currentOrder.topUpTargetOrderId !== undefined
+      ? orders.find((candidate) => candidate.id === currentOrder?.topUpTargetOrderId)
+      : undefined;
 
   return `
     <article class="order-card">
       <div class="order-heading">
         <div>
-          <span class="kicker">Order #${currentOrder.id.toString()}</span>
-          <h3>${html(currentOrder.config.name)}</h3>
+          <span class="kicker">${topUpOrder ? "Top-up" : "Order"} #${currentOrder.id.toString()}</span>
+          <h3>${html(topUpOrder && targetOrder ? `Top up ${targetOrder.config.name}` : currentOrder.config.name)}</h3>
         </div>
         <span class="status status-${status.toLowerCase()}">${html(statusLabel(status))}</span>
       </div>
       ${
-        isLive
+        isLive && !topUpOrder
+          ? renderCycleBalancePanel(currentOrder)
+          : ""
+      }
+      ${
+        isLive && !topUpOrder
+          ? renderTopUpPanel(currentOrder)
+          : ""
+      }
+      ${
+        isLive || topUpOrder
           ? ""
           : renderAppPreview(
               savedConfig,
@@ -1127,14 +1214,14 @@ function renderCurrentOrder(): string {
       }
       ${timeline(currentOrder)}
       <div class="order-facts">
-        <div><small>Plan price</small><strong>${money(currentOrder.expectedAmountUsdCents)} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</strong></div>
+        <div><small>${topUpOrder ? "Top-up price" : "Order price"}</small><strong>${money(currentOrder.expectedAmountUsdCents)} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</strong></div>
         <div><small>Settlement target</small><strong>${html(settlementLabel(currentOrder))}</strong></div>
-        <div><small>App funding</small><strong>${cycles(currentOrder.expectedCycles)} cycles</strong></div>
+        <div><small>${topUpOrder ? "Cycles purchased" : "Starter cycles"}</small><strong>${cycles(currentOrder.expectedCycles)} cycles</strong></div>
       </div>
       <div class="payment-explainer">
         <strong>How payment works</strong>
         <ol>
-          <li>The plan is priced in ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")} for clarity.</li>
+          <li>The ${topUpOrder ? "top-up" : "deployment"} is priced in ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")} using the current cycle market rate.</li>
           <li>NEAR Intents quotes the exact amount of your chosen source token.</li>
           <li>The relayer confirms delivery of ${html(settlementLabel(currentOrder))}; you never need an ICP or cycles wallet.</li>
         </ol>
@@ -1224,7 +1311,15 @@ function renderCurrentOrder(): string {
 
       ${
         canDeploy
-          ? `<button class="button deploy" id="deploy-button" type="button">${status === "Failed" ? "Retry deployment" : "Deploy app on ICP"}</button>`
+          ? `<button class="button deploy" id="deploy-button" type="button">${
+              status === "Failed"
+                ? topUpOrder
+                  ? "Retry top-up"
+                  : "Retry deployment"
+                : topUpOrder
+                  ? "Apply cycle top-up"
+                  : "Deploy app on ICP"
+            }</button>`
           : ""
       }
       ${
@@ -1270,7 +1365,7 @@ function renderOrders(): string {
     .map((order) => `
       <button class="app-row" data-order="${order.id.toString()}" type="button">
         <span class="app-mark" style="--mark:${html(order.config.accentColor)}"></span>
-        <span><strong>${html(order.config.name)}</strong><small>${html(order.templateId)} / ${order.fundingMonths.toString()} months</small></span>
+        <span><strong>${html(order.config.name)}</strong><small>${html(order.templateId)} / pay-as-you-go</small></span>
         <span class="status status-${order.status.toLowerCase()}">${html(statusLabel(order.status))}</span>
         <span class="row-arrow">-&gt;</span>
       </button>
@@ -1295,10 +1390,8 @@ function renderPrincipalPanel(): string {
 function readinessStatus(): string {
   if (!factoryReadiness) return "Checking";
   if (!factoryReadiness.templateWasmConfigured) return "Template missing";
-  const supported = supportedFundingMonths();
-  if (supported.length === 0) return "Needs cycles";
-  if (supported.length < 3) return "Limited capacity";
-  return "All plans ready";
+  if (!factoryCanDeploy()) return "Needs cycles";
+  return "Ready";
 }
 
 function renderAdmin(): string {
@@ -1327,7 +1420,7 @@ function renderAdmin(): string {
       }
       ${
         factoryReadiness && !factoryReadiness.canDeploy
-          ? `<div class="admin-alert"><strong>Factory capacity</strong><span>${html(factoryCapacityMessage() || "Additional cycles are required.")} To enable the six-month plan now, top up <code>${html(factoryCanisterId || "launcher_factory")}</code> by at least <code>${factoryShortfall(6)?.toString() || "0"}</code> cycles.</span></div>`
+          ? `<div class="admin-alert"><strong>Factory capacity</strong><span>${html(factoryCapacityMessage() || "Additional cycles are required.")} Top up <code>${html(factoryCanisterId || "launcher_factory")}</code> by at least <code>${factoryDeployShortfall()?.toString() || "0"}</code> cycles to resume deployments.</span></div>`
           : ""
       }
       ${
@@ -1340,21 +1433,11 @@ function renderAdmin(): string {
         <form class="admin-card" id="pricing-form">
           <div class="admin-card-heading"><span class="section-label">Pricing</span><strong>${html(publicConfig.paymentDisplay.priceCurrency)}</strong></div>
           <label>Deployment service fee<input name="serviceFee" value="${units(pricing.serviceFeeUsdCents, 2, 2)}" inputmode="decimal" /></label>
-          <label>Monthly funding price<input name="monthlyFunding" value="${units(pricing.monthlyFundingUsdCents, 2, 2)}" inputmode="decimal" /></label>
-          <div class="field-row">
-            <label>Base canister allocation (T)<input name="creationCycles" value="${units(pricing.creationCycles, 12, 3)}" inputmode="decimal" /></label>
-            <label>Monthly operating allowance (T)<input name="monthlyCycles" value="${units(pricing.monthlyCycles, 12, 3)}" inputmode="decimal" /></label>
-          </div>
-          <label>Contingency buffer (T)<input name="cycleBuffer" value="${units(pricing.cycleBuffer, 12, 3)}" inputmode="decimal" /></label>
-          <div class="cycle-plan-summary">
-            ${[1, 3, 6]
-              .map(
-                (months) =>
-                  `<span><small>${months}-month allocation</small><strong>${cycles(configuredPlanCycles(months))}</strong></span>`,
-              )
-              .join("")}
-          </div>
-          <p class="muted">The USD funding price is what the customer pays. The allocation totals above are the cycles the factory transfers to each new app.</p>
+          <label>Starter deploy allocation (T)<input name="initialDeployCycles" value="${units(pricing.initialDeployCycles ?? INITIAL_DEPLOY_CYCLES, 12, 3)}" inputmode="decimal" /></label>
+          <label>Cycle markup (%)<input name="cyclesMarkupPercent" value="${(Number(pricing.cyclesMarkupBps ?? 5_000n) / 100).toFixed(0)}" inputmode="numeric" /></label>
+          <label>USD per trillion cycles<input name="usdPerTrillion" value="${units(pricing.usdPerTrillionCents ?? 100n, 2, 2)}" inputmode="decimal" /></label>
+          <p class="muted">Market rate is refreshed by the relayer. Deploy orders include template + service + marked-up starter cycles. Top-ups charge only marked-up cycles.</p>
+          <button class="button secondary wide" id="refresh-rate-button" type="button">Refresh market cycle rate</button>
           <button class="button secondary wide" id="cycle-preset-button" type="button">Apply conservative cycle preset</button>
           <button class="button primary wide" type="submit">Save pricing</button>
         </form>
@@ -1430,16 +1513,17 @@ function renderAdmin(): string {
 
 function render(): void {
   const template = activeTemplate();
-  const initialBreakdown = pricingBreakdown(template, selectedFundingMonths);
   const managingOrder = currentOrder !== null;
   const managingLiveApp =
-    currentOrder?.status === "Live" && Boolean(currentOrder.createdCanisterId);
+    currentOrder?.status === "Live" &&
+    Boolean(currentOrder.createdCanisterId) &&
+    !isTopUpOrder(currentOrder);
   const canCreateOrder =
     signedIn &&
     publicConfig?.ordersEnabled &&
     paymentConfigMatches() &&
     relayerReadyForOrders() &&
-    factoryPlanAvailable(selectedFundingMonths) &&
+    factoryCanDeploy() &&
     !busy;
 
   app.innerHTML = `
@@ -1475,7 +1559,7 @@ function render(): void {
           <div class="hero-copy">
             <div class="eyebrow"><span>NEAR Intents</span><i></i><span>Internet Computer</span></div>
             <h1>Ask for an app.<br /><em>Get a live canister.</em></h1>
-            <p>Deploy and fund a real ICP application without handling cycles, Wasm installation, or chain-specific payment rails.</p>
+            <p>Deploy a real ICP application with starter cycles, monitor balance, and top up on demand through NEAR Intents.</p>
             <a class="button primary" href="#launch">Start a deployment</a>
           </div>
           <div class="hero-console" aria-label="Deployment flow preview">
@@ -1483,8 +1567,8 @@ function render(): void {
             <div class="console-body">
               <div><small>OUTCOME</small><strong>Launch "Northstar" on ICP</strong></div>
               <div class="console-route"><span>Source token</span><b>-&gt;</b><span>NEAR Intents</span><b>-&gt;</b><span>${html(publicConfig?.paymentDisplay.settlementSymbol || "USDC")}</span></div>
-              <pre><code><span>template</span> grant-page
-<span>funding</span> 3 months
+              <pre><code><span>template</span> portfolio
+<span>starter</span> 2T cycles
 <span>controller</span> user principal
 <span>status</span> <b>ready to deploy</b></code></pre>
             </div>
@@ -1509,7 +1593,7 @@ function render(): void {
             <form class="builder-form" id="launch-form">
               <div class="form-heading">
                 <span class="section-label">Configure ${html(template?.name || "app")}</span>
-                <span class="price-preview" id="price-preview">fixed ${initialBreakdown ? money(initialBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
+                <span class="price-preview" id="price-preview">from ${deployBreakdown ? money(deployBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
               </div>
               <div class="field-row">
                 <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
@@ -1533,17 +1617,11 @@ function render(): void {
                 "Updates as you type",
                 "draft-preview-frame",
               )}
-              <label>Funding duration
-                <div class="funding-options">
-                  ${[1, 3, 6]
-                    .map((months) => {
-                      const available = factoryPlanAvailable(months);
-                      return `<input id="fund-${months}" type="radio" name="fundingMonths" value="${months}" ${months === selectedFundingMonths ? "checked" : ""} ${available ? "" : "disabled"}><label for="fund-${months}" class="${available ? "" : "unavailable"}">${months}<small>${available ? `month${months > 1 ? "s" : ""}` : "needs cycles"}</small></label>`;
-                    })
-                    .join("")}
-                </div>
-              </label>
-              <div id="pricing-breakdown">${renderPriceBreakdown(template, selectedFundingMonths)}</div>
+              <div class="starter-cycles-note">
+                <span class="section-label">Pay as you go</span>
+                <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from your live app panel.</p>
+              </div>
+              <div id="pricing-breakdown">${renderDeployPriceBreakdown(deployBreakdown)}</div>
               <button class="button primary wide" type="submit" ${canCreateOrder ? "" : "disabled"}>
                 ${
                   signedIn
@@ -1551,8 +1629,8 @@ function render(): void {
                       ? "Payment configuration mismatch"
                       : !relayerReadyForOrders()
                         ? "Payment service unavailable"
-                        : !factoryPlanAvailable(selectedFundingMonths)
-                          ? "Selected plan needs more cycles"
+                        : !factoryCanDeploy()
+                          ? "Factory needs more cycles"
                       : publicConfig?.ordersEnabled
                         ? "Create deployment order"
                         : "New orders are paused"
@@ -1592,10 +1670,10 @@ function render(): void {
             <div><span class="kicker">Chain abstraction, applied</span><h2>One outcome, four systems.</h2></div>
           </div>
           <div class="architecture">
-            <article><span>01</span><strong>Express intent</strong><p>Pick a template, content, and a funding window.</p></article>
+            <article><span>01</span><strong>Express intent</strong><p>Pick a template, configure content, and start with 2T cycles.</p></article>
             <article><span>02</span><strong>Route payment</strong><p>NEAR 1Click quotes the exact source-token amount for the fixed settlement target.</p></article>
             <article><span>03</span><strong>Verify settlement</strong><p>The authorized relayer submits a replay-safe proof to ICP.</p></article>
-            <article><span>04</span><strong>Create canister</strong><p>The factory allocates cycles, installs approved Wasm, and assigns ownership.</p></article>
+            <article><span>04</span><strong>Create canister</strong><p>The factory installs approved Wasm, funds the app, and lets you top up later.</p></article>
           </div>
         </section>
       </main>
@@ -1629,7 +1707,7 @@ function bindEvents(): void {
   document.querySelectorAll<HTMLElement>("[data-template]").forEach((element) => {
     element.addEventListener("click", () => {
       selectedTemplate = element.dataset.template || selectedTemplate;
-      render();
+      void refreshDeployBreakdown().then(() => render());
     });
   });
 
@@ -1648,7 +1726,7 @@ function bindEvents(): void {
   });
   document
     .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-      "#launch-form input:not([name='fundingMonths']):not([type='file']):not([name='accentColorPicker']), #launch-form textarea",
+      "#launch-form input:not([type='file']):not([name='accentColorPicker']), #launch-form textarea",
     )
     .forEach((field) => {
       field.addEventListener("input", () => {
@@ -1676,8 +1754,16 @@ function bindEvents(): void {
     bindProjectsEditor(launchForm, refreshDraftPreview);
   }
 
-  document.querySelectorAll<HTMLInputElement>('input[name="fundingMonths"]').forEach((input) => {
-    input.addEventListener("change", () => updatePricingPreview(Number(input.value)));
+  document.querySelectorAll<HTMLInputElement>('input[name="topUpCycles"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      void updateTopUpPreview(BigInt(input.value));
+    });
+  });
+  document.querySelector("#create-topup-button")?.addEventListener("click", () => {
+    void createTopUpOrder();
+  });
+  document.querySelector("#refresh-cycle-balance")?.addEventListener("click", () => {
+    void refreshCurrentCycleBalance(true);
   });
 
   document.querySelector("#origin-asset")?.addEventListener("change", updateRefundHelp);
@@ -1752,6 +1838,9 @@ function bindEvents(): void {
   document.querySelector("#cycle-preset-button")?.addEventListener("click", () => {
     void applyConservativeCyclePreset();
   });
+  document.querySelector("#refresh-rate-button")?.addEventListener("click", () => {
+    void refreshCyclesRate(true);
+  });
   document.querySelector<HTMLFormElement>("#payment-config-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     if (event.currentTarget instanceof HTMLFormElement) {
@@ -1787,15 +1876,27 @@ function bindEvents(): void {
   });
 }
 
-function updatePricingPreview(months: number): void {
-  selectedFundingMonths = months;
-  const breakdown = pricingBreakdown(activeTemplate(), months);
-  const preview = document.querySelector("#price-preview");
-  const details = document.querySelector("#pricing-breakdown");
-  if (preview && breakdown) {
-    preview.textContent = `fixed ${money(breakdown.totalUsdCents)} ${publicConfig?.paymentDisplay.priceCurrency || "USD"}`;
+async function refreshDeployBreakdown(): Promise<void> {
+  if (!actor || !selectedTemplate) {
+    deployBreakdown = null;
+    return;
   }
-  if (details) details.innerHTML = renderPriceBreakdown(activeTemplate(), months);
+  deployBreakdown = unwrapPricing(await actor.quoteDeployment(selectedTemplate));
+}
+
+async function refreshTopUpBreakdown(amount = selectedTopUpCycles): Promise<void> {
+  if (!actor) {
+    topUpBreakdown = null;
+    return;
+  }
+  topUpBreakdown = unwrapPricing(await actor.quoteTopUp(amount));
+}
+
+async function updateTopUpPreview(amount: bigint): Promise<void> {
+  selectedTopUpCycles = amount;
+  await refreshTopUpBreakdown(amount);
+  const details = document.querySelector("#topup-pricing-breakdown");
+  if (details) details.innerHTML = renderTopUpPriceBreakdown(topUpBreakdown);
 }
 
 function previewConfigFromForm(
@@ -2080,7 +2181,6 @@ async function createOrder(form: HTMLFormElement): Promise<void> {
     }
     const result = await actor.createDeploymentOrder({
       templateId: selectedTemplate,
-      fundingMonths: BigInt(String(data.get("fundingMonths"))),
       config: toCanisterConfig(draftConfig),
     });
     currentOrder = unwrapResult(result);
@@ -2154,7 +2254,12 @@ async function restoreQuote(order: DeploymentOrder): Promise<void> {
 async function selectOrder(order: DeploymentOrder): Promise<void> {
   await withBusy(async () => {
     currentOrder = order;
-    await restoreQuote(order);
+    await Promise.all([
+      restoreQuote(order),
+      order.status === "Live" && !isTopUpOrder(order)
+        ? refreshCurrentCycleBalance(true)
+        : refreshTopUpBreakdown(selectedTopUpCycles),
+    ]);
     location.hash = "#launch";
   }, "Loading deployment...");
 }
@@ -2216,12 +2321,53 @@ async function refreshPaymentStatus(): Promise<void> {
 }
 
 async function deployCurrentOrder(): Promise<void> {
+  const busyLabel =
+    currentOrder && isTopUpOrder(currentOrder)
+      ? "Applying cycle top-up..."
+      : "Deploying app canister...";
   await withBusy(async () => {
     if (!actor || !currentOrder) throw new Error("No deployment order selected.");
+    const wasTopUp = isTopUpOrder(currentOrder);
+    const targetOrderId = currentOrder.topUpTargetOrderId;
     currentOrder = unwrapResult(await actor.deployPaidOrder(currentOrder.id));
     await Promise.all([loadOrders(), loadFactoryReadiness()]);
-    notice = "The factory installed your app canister.";
-  }, "Deploying app canister...");
+    if (wasTopUp && targetOrderId !== undefined) {
+      const target = orders.find((order) => order.id === targetOrderId);
+      if (target) {
+        currentOrder = target;
+        await refreshCurrentCycleBalance(true);
+      }
+      notice = "Cycle top-up applied to your live app canister.";
+    } else {
+      await refreshCurrentCycleBalance(true);
+      notice = "The factory installed your app canister.";
+    }
+  }, busyLabel);
+}
+
+async function createTopUpOrder(): Promise<void> {
+  await withBusy(async () => {
+    if (!signedIn || !actor || !currentOrder) {
+      throw new Error("Select a live app before creating a top-up order.");
+    }
+    if (currentOrder.status !== "Live" || isTopUpOrder(currentOrder)) {
+      throw new Error("Only live deployment orders can be topped up.");
+    }
+    if (selectedTopUpCycles < MIN_TOP_UP_CYCLES || selectedTopUpCycles > MAX_TOP_UP_CYCLES) {
+      throw new Error("Choose a top-up between 0.1T and 3T cycles.");
+    }
+
+    currentOrder = unwrapResult(
+      await actor.createTopUpOrder({
+        targetOrderId: currentOrder.id,
+        topUpCycles: selectedTopUpCycles,
+      }),
+    );
+    currentQuote = null;
+    paymentError = "";
+    await loadOrders();
+    notice = `Top-up order #${currentOrder.id.toString()} created on ICP.`;
+  }, "Creating top-up order...");
 }
 
 async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
@@ -2340,18 +2486,42 @@ async function loadAdminAccess(): Promise<void> {
 
 async function loadFactoryReadiness(): Promise<void> {
   if (!factoryActor || !publicConfig) return;
-  const required =
-    publicConfig.pricing.creationCycles +
-    publicConfig.pricing.cycleBuffer +
-    6n * publicConfig.pricing.monthlyCycles;
-  factoryReadiness = await factoryActor.getReadiness(required);
-  const supported = supportedFundingMonths();
-  const firstSupported = supported[0];
-  if (
-    firstSupported !== undefined &&
-    !supported.includes(selectedFundingMonths)
-  ) {
-    selectedFundingMonths = firstSupported;
+  factoryReadiness = await factoryActor.getReadiness(configuredInitialDeployCycles());
+}
+
+async function loadCyclesRate(forceRefresh = false): Promise<void> {
+  try {
+    const query = forceRefresh ? "?refresh=true" : "";
+    const response = await fetch(`${RELAYER_URL}/api/cycles-rate${query}`);
+    if (!response.ok) return;
+    cyclesRate = (await response.json()) as CyclesRate;
+    await Promise.all([refreshDeployBreakdown(), refreshTopUpBreakdown()]);
+    if (publicConfig) {
+      await loadPublicData();
+    }
+  } catch {
+    cyclesRate = null;
+  }
+}
+
+async function refreshCyclesRate(forceRefresh = false): Promise<void> {
+  await withBusy(async () => {
+    await loadCyclesRate(forceRefresh);
+    notice = cyclesRate?.syncedToBackend
+      ? `Market cycle rate updated to ${money(BigInt(cyclesRate.usdPerTrillionCents))} per trillion cycles.`
+      : "Fetched the latest market cycle rate.";
+  }, "Refreshing cycle market rate...");
+}
+
+async function refreshCurrentCycleBalance(force = false): Promise<void> {
+  if (!actor || !currentOrder) return;
+  if (currentOrder.status !== "Live" || isTopUpOrder(currentOrder)) return;
+  const cacheKey = currentOrder.id.toString();
+  if (!force && cycleBalances.has(cacheKey)) return;
+
+  const result = await actor.getCanisterCycleBalance(currentOrder.id);
+  if (result.__kind__ === "ok") {
+    cycleBalances.set(cacheKey, result.ok);
   }
 }
 
@@ -2384,19 +2554,27 @@ async function loadTokens(): Promise<void> {
 
 async function savePricing(form: HTMLFormElement): Promise<void> {
   await withBusy(async () => {
-    if (!actor) throw new Error("Admin actor is unavailable.");
+    if (!actor || !publicConfig) throw new Error("Admin actor is unavailable.");
     const data = new FormData(form);
+    const markupPercent = Number(String(data.get("cyclesMarkupPercent") || "0"));
+    if (!Number.isFinite(markupPercent) || markupPercent < 0 || markupPercent > 200) {
+      throw new Error("Cycle markup must be between 0% and 200%.");
+    }
     unwrapUnit(
       await actor.setPricingConfig({
+        ...publicConfig.pricing,
         serviceFeeUsdCents: decimalToUnits(String(data.get("serviceFee")), 2),
-        monthlyFundingUsdCents: decimalToUnits(String(data.get("monthlyFunding")), 2),
-        creationCycles: decimalToUnits(String(data.get("creationCycles")), 12),
-        monthlyCycles: decimalToUnits(String(data.get("monthlyCycles")), 12),
-        cycleBuffer: decimalToUnits(String(data.get("cycleBuffer")), 12),
+        monthlyFundingUsdCents: 0n,
+        creationCycles: 0n,
+        monthlyCycles: 0n,
+        cycleBuffer: 0n,
+        initialDeployCycles: decimalToUnits(String(data.get("initialDeployCycles")), 12),
+        cyclesMarkupBps: BigInt(Math.round(markupPercent * 100)),
+        usdPerTrillionCents: decimalToUnits(String(data.get("usdPerTrillion")), 2),
       }),
     );
     await loadPublicData();
-    await loadFactoryReadiness();
+    await Promise.all([loadFactoryReadiness(), refreshDeployBreakdown(), refreshTopUpBreakdown()]);
     notice = "Pricing updated for future orders.";
   }, "Saving pricing...");
 }
@@ -2512,13 +2690,21 @@ async function init(): Promise<void> {
     await Promise.all([
       loadTokens(),
       loadRelayerHealth(),
+      loadCyclesRate(),
       loadFactoryReadiness(),
+      refreshDeployBreakdown(),
+      refreshTopUpBreakdown(),
       loadAdminAccess(),
     ]);
     if (signedIn) {
       await loadOrders();
       currentOrder = orders[0] || null;
-      if (currentOrder) await restoreQuote(currentOrder);
+      if (currentOrder) {
+        await restoreQuote(currentOrder);
+        if (currentOrder.status === "Live" && !isTopUpOrder(currentOrder)) {
+          await refreshCurrentCycleBalance(true);
+        }
+      }
     }
   } catch (error) {
     notice = error instanceof Error ? error.message : String(error);

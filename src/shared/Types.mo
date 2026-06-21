@@ -53,6 +53,9 @@ module {
     creationCycles : Nat;
     monthlyCycles : Nat;
     cycleBuffer : Nat;
+    initialDeployCycles : ?Nat;
+    cyclesMarkupBps : ?Nat;
+    usdPerTrillionCents : ?Nat;
   };
 
   public type PricingBreakdown = {
@@ -61,6 +64,13 @@ module {
     fundingUsdCents : Nat;
     totalUsdCents : Nat;
     initialCycles : Nat;
+    cyclesBaseUsdCents : Nat;
+    cyclesMarkupUsdCents : Nat;
+  };
+
+  public type OrderKind = {
+    #Deploy;
+    #TopUp;
   };
 
   public type PublicConfig = {
@@ -106,12 +116,18 @@ module {
     createdCanisterId : ?Principal;
     appUrl : ?Text;
     error : ?Text;
+    orderKind : ?OrderKind;
+    topUpTargetOrderId : ?Nat;
   };
 
   public type CreateOrderRequest = {
     templateId : Text;
     config : AppConfig;
-    fundingMonths : Nat;
+  };
+
+  public type CreateTopUpOrderRequest = {
+    targetOrderId : Nat;
+    topUpCycles : Nat;
   };
 
   public type SettlementProof = {
@@ -129,6 +145,13 @@ module {
     templateId : Text;
     config : AppConfig;
     initialCycles : Nat;
+  };
+
+  public type FactoryTopUpRequest = {
+    orderId : Nat;
+    owner : Principal;
+    canisterId : Principal;
+    cycles : Nat;
   };
 
   public type FactoryDeployError = {
@@ -185,6 +208,11 @@ module {
     templateWasmConfigured : Bool;
     templateWasmSize : Nat;
     canDeploy : Bool;
+  };
+
+  public type ChildCycleStatus = {
+    cycles : Nat;
+    idleCyclesBurnedPerDay : Nat;
   };
 
   public type ChildInit = {

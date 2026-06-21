@@ -53,6 +53,7 @@ shared (install) actor class LauncherFactory() = Self {
     cycles : Nat;
     settings : CanisterSettings;
     module_hash : ?Blob;
+    idle_cycles_burned_per_day : Nat;
   };
 
   type ChildApp = actor {
@@ -183,6 +184,15 @@ shared (install) actor class LauncherFactory() = Self {
       ic.deposit_cycles({ canister_id = canisterId });
   };
 
+  func depositCyclesToChild(canisterId : Principal, amount : Nat) : async () {
+    if (amount == 0) return;
+    if (not hasTopUpCapacity(amount)) {
+      Runtime.trap("Factory does not have enough cycles for this deposit.");
+    };
+    await (with cycles = amount)
+      ic.deposit_cycles({ canister_id = canisterId });
+  };
+
   public query func getOwner() : async Principal {
     owner;
   };
@@ -208,6 +218,93 @@ shared (install) actor class LauncherFactory() = Self {
 
   public query func getCycleBalance() : async Nat {
     Cycles.balance();
+  };
+
+  public shared func getChildCycleStatus(
+    canisterId : Principal,
+  ) : async Types.ChildCycleStatus {
+    let status = await ic.canister_status({ canister_id = canisterId });
+    {
+      cycles = status.cycles;
+      idleCyclesBurnedPerDay = status.idle_cycles_burned_per_day;
+    };
+  };
+
+  public shared ({ caller }) func topUpChild(
+    request : Types.FactoryTopUpRequest,
+  ) : async Result.Result<(), Text> {
+    requireLauncher(caller);
+
+    switch (acquire(request.orderId)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+
+    try {
+      switch (deployments.get(request.orderId)) {
+        case (?deployment) {
+          if (deployment.owner != request.owner) {
+            return #err("Order ID is already bound to a different owner.");
+          };
+        };
+        case (null) {};
+      };
+
+      if (request.cycles < CyclePolicy.MIN_TOP_UP_CYCLES) {
+        return #err("Top-up amount is below the minimum.");
+      };
+      if (request.cycles > CyclePolicy.MAX_TOP_UP_CYCLES) {
+        return #err("Top-up amount exceeds the per-order maximum.");
+      };
+      if (not hasTopUpCapacity(request.cycles)) {
+        return #err("Factory does not have enough cycles for this top-up.");
+      };
+
+      deployments.add(
+        request.orderId,
+        {
+          orderId = request.orderId;
+          owner = request.owner;
+          templateId = "top-up";
+          status = #Installing;
+          canisterId = ?request.canisterId;
+          error = null;
+        },
+      );
+
+      try {
+        await depositCyclesToChild(request.canisterId, request.cycles);
+      } catch (error) {
+        let message = "Canister top-up failed: " # error.message();
+        deployments.add(
+          request.orderId,
+          {
+            orderId = request.orderId;
+            owner = request.owner;
+            templateId = "top-up";
+            status = #Failed;
+            canisterId = ?request.canisterId;
+            error = ?message;
+          },
+        );
+        return #err(message);
+      };
+
+      deployments.add(
+        request.orderId,
+        {
+          orderId = request.orderId;
+          owner = request.owner;
+          templateId = "top-up";
+          status = #Live;
+          canisterId = ?request.canisterId;
+          error = null;
+        },
+      );
+      #ok(());
+    } finally {
+      release(request.orderId);
+    };
   };
 
   public query func getReadiness(requiredCycles : Nat) : async Types.FactoryReadiness {

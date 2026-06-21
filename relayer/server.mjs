@@ -78,6 +78,22 @@ function parseAllowedOrigins(value) {
   return new Set(origins);
 }
 
+const METRICS_API_BASE =
+  process.env.METRICS_API_BASE || "https://metrics-api.internetcomputer.org";
+const ICP_PRICE_API =
+  process.env.ICP_PRICE_API ||
+  "https://api.coingecko.com/api/v3/simple/price?ids=internet-computer&vs_currencies=usd";
+const CYCLES_RATE_SCALE = 10_000n;
+const TRILLION_CYCLES = 1_000_000_000_000n;
+const DEFAULT_USD_PER_TRILLION_CENTS = 100;
+const cyclesRateCache = {
+  usdPerTrillionCents: DEFAULT_USD_PER_TRILLION_CENTS,
+  icpUsd: null,
+  icpXdrRate: null,
+  fetchedAt: 0,
+  source: "default",
+};
+
 const config = {
   port: Number(process.env.RELAYER_PORT || 8787),
   mock: process.env.RELAYER_MOCK !== "false",
@@ -392,6 +408,108 @@ async function fetchTokens() {
   return oneClickFetch("/v0/tokens", { method: "GET" });
 }
 
+function latestMetricSample(series) {
+  if (!Array.isArray(series) || series.length === 0) return null;
+  const sample = series[series.length - 1];
+  if (!Array.isArray(sample) || sample.length < 2) return null;
+  const value = BigInt(sample[1]);
+  if (value <= 0n) return null;
+  return value;
+}
+
+function computeUsdPerTrillionCents(icpXdrRate, icpUsd) {
+  if (icpXdrRate <= 0n || icpUsd <= 0) return DEFAULT_USD_PER_TRILLION_CENTS;
+  const icpPerTrillionScaled =
+    (TRILLION_CYCLES * CYCLES_RATE_SCALE) / icpXdrRate;
+  const usdPerTrillionScaled = Math.round(
+    (Number(icpPerTrillionScaled) / Number(CYCLES_RATE_SCALE)) * icpUsd * 100,
+  );
+  if (
+    !Number.isFinite(usdPerTrillionScaled) ||
+    usdPerTrillionScaled <= 0 ||
+    usdPerTrillionScaled > 1_000_000
+  ) {
+    return DEFAULT_USD_PER_TRILLION_CENTS;
+  }
+  return usdPerTrillionScaled;
+}
+
+async function fetchMarketCyclesRate(forceRefresh = false) {
+  const maxAgeMs = 15 * 60_000;
+  if (
+    !forceRefresh &&
+    cyclesRateCache.fetchedAt > 0 &&
+    Date.now() - cyclesRateCache.fetchedAt < maxAgeMs
+  ) {
+    return cyclesRateCache;
+  }
+
+  let icpXdrRate = cyclesRateCache.icpXdrRate;
+  let icpUsd = cyclesRateCache.icpUsd;
+  let source = "cache";
+
+  try {
+    const response = await fetch(
+      `${METRICS_API_BASE}/api/v1/icp-xdr-conversion-rates`,
+    );
+    if (response.ok) {
+      const payload = await response.json();
+      icpXdrRate = latestMetricSample(payload.icp_xdr_conversion_rates);
+      source = "metrics-api";
+    }
+  } catch {
+    // Keep the previous conversion rate when the metrics API is unavailable.
+  }
+
+  try {
+    const response = await fetch(ICP_PRICE_API);
+    if (response.ok) {
+      const payload = await response.json();
+      const nextPrice = payload?.["internet-computer"]?.usd;
+      if (typeof nextPrice === "number" && nextPrice > 0) {
+        icpUsd = nextPrice;
+        source = source === "metrics-api" ? "metrics-api+coingecko" : "coingecko";
+      }
+    }
+  } catch {
+    // Keep the previous ICP price when the price API is unavailable.
+  }
+
+  const usdPerTrillionCents =
+    icpXdrRate && icpUsd
+      ? computeUsdPerTrillionCents(icpXdrRate, icpUsd)
+      : cyclesRateCache.usdPerTrillionCents;
+
+  cyclesRateCache.usdPerTrillionCents = usdPerTrillionCents;
+  cyclesRateCache.icpUsd = icpUsd;
+  cyclesRateCache.icpXdrRate =
+    icpXdrRate === null || icpXdrRate === undefined
+      ? null
+      : icpXdrRate.toString();
+  cyclesRateCache.fetchedAt = Date.now();
+  cyclesRateCache.source = source;
+  return cyclesRateCache;
+}
+
+async function syncMarketCyclesRate(forceRefresh = false) {
+  const rate = await fetchMarketCyclesRate(forceRefresh);
+  if (!backendRuntime.ready) return rate;
+
+  try {
+    await callBackend(
+      "setUsdPerTrillionCents",
+      [BigInt(rate.usdPerTrillionCents)],
+      `(${rate.usdPerTrillionCents})`,
+    );
+    rate.syncedToBackend = true;
+  } catch (error) {
+    rate.syncedToBackend = false;
+    rate.syncError =
+      error instanceof Error ? error.message : "Could not update backend rate.";
+  }
+  return rate;
+}
+
 function fallbackTokens() {
   return [
     {
@@ -672,6 +790,27 @@ app.get("/health", (_request, response) => {
     backendErrorCode: backendRuntime.errorCode || undefined,
     backendError: backendRuntime.error || undefined,
   });
+});
+
+app.get("/api/cycles-rate", async (request, response) => {
+  try {
+    const forceRefresh = request.query.refresh === "true";
+    const rate = await syncMarketCyclesRate(forceRefresh);
+    response.json({
+      usdPerTrillionCents: rate.usdPerTrillionCents,
+      icpUsd: rate.icpUsd,
+      icpXdrRate: rate.icpXdrRate,
+      source: rate.source,
+      fetchedAt: rate.fetchedAt,
+      syncedToBackend: rate.syncedToBackend ?? false,
+      ...(rate.syncError ? { syncError: rate.syncError } : {}),
+    });
+  } catch (error) {
+    response.status(503).json({
+      error: error instanceof Error ? error.message : String(error),
+      usdPerTrillionCents: cyclesRateCache.usdPerTrillionCents,
+    });
+  }
 });
 
 app.get("/api/tokens", async (_request, response) => {
@@ -959,6 +1098,7 @@ app.post("/api/mock/settle", async (request, response) => {
 });
 
 await initializeBackendConnection();
+void syncMarketCyclesRate(true);
 
 const server = app.listen(config.port, "127.0.0.1", () => {
   console.log(

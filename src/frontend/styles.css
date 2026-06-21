@@ -795,6 +795,89 @@ textarea {
   opacity: 0.42;
 }
 
+.starter-cycles-note,
+.cycle-balance-panel,
+.top-up-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 0 0 20px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.starter-cycles-note p,
+.cycle-balance-panel p,
+.top-up-panel p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.cycle-balance-heading,
+.top-up-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.cycle-balance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cycle-balance-grid small {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.cycle-balance-grid strong {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+}
+
+.top-up-options {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 10px 0 16px;
+}
+
+.top-up-options input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.top-up-options label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+}
+
+.top-up-options small {
+  color: var(--muted);
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
+  font-size: 0.65rem;
+}
+
+.top-up-options input:checked + label {
+  border-color: var(--green);
+  background: var(--green-dark);
+}
+
 .pulse {
   width: 8px;
   height: 8px;

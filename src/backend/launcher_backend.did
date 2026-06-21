@@ -52,6 +52,9 @@ type PricingConfig = record {
   creationCycles : nat;
   monthlyCycles : nat;
   cycleBuffer : nat;
+  initialDeployCycles : opt nat;
+  cyclesMarkupBps : opt nat;
+  usdPerTrillionCents : opt nat;
 };
 
 type PricingBreakdown = record {
@@ -60,6 +63,13 @@ type PricingBreakdown = record {
   fundingUsdCents : nat;
   totalUsdCents : nat;
   initialCycles : nat;
+  cyclesBaseUsdCents : nat;
+  cyclesMarkupUsdCents : nat;
+};
+
+type OrderKind = variant {
+  Deploy;
+  TopUp;
 };
 
 type PublicConfig = record {
@@ -105,12 +115,23 @@ type DeploymentOrder = record {
   createdCanisterId : opt principal;
   appUrl : opt text;
   error : opt text;
+  orderKind : opt OrderKind;
+  topUpTargetOrderId : opt nat;
 };
 
 type CreateOrderRequest = record {
   templateId : text;
   config : AppConfig;
-  fundingMonths : nat;
+};
+
+type CreateTopUpOrderRequest = record {
+  targetOrderId : nat;
+  topUpCycles : nat;
+};
+
+type ChildCycleStatus = record {
+  cycles : nat;
+  idleCyclesBurnedPerDay : nat;
 };
 
 type SettlementProof = record {
@@ -130,6 +151,7 @@ type PlatformStats = record {
 
 type ResultOrder = variant { ok : DeploymentOrder; err : text };
 type ResultPricing = variant { ok : PricingBreakdown; err : text };
+type ResultChildCycleStatus = variant { ok : ChildCycleStatus; err : text };
 type ResultText = variant { ok : text; err : text };
 type ResultUnit = variant { ok; err : text };
 
@@ -141,8 +163,10 @@ service : () -> {
   cancelAuthorizedDeploymentOrder : (nat, text, text) -> (ResultOrder);
   cancelDeploymentOrder : (nat) -> (ResultOrder);
   createDeploymentOrder : (CreateOrderRequest) -> (ResultOrder);
+  createTopUpOrder : (CreateTopUpOrderRequest) -> (ResultOrder);
   deployPaidOrder : (nat) -> (ResultOrder);
   getAdminAccess : () -> (AdminAccess) query;
+  getCanisterCycleBalance : (nat) -> (ResultChildCycleStatus);
   getDeploymentOrder : (nat) -> (opt DeploymentOrder) query;
   getMyDeployments : (nat, nat) -> (vec DeploymentOrder) query;
   getOwner : () -> (principal) query;
@@ -155,7 +179,8 @@ service : () -> {
   listTemplates : () -> (vec Template) query;
   markPaymentSettled : (nat, SettlementProof) -> (ResultOrder);
   markRefundRequired : (nat, text) -> (ResultOrder);
-  quoteDeployment : (text, nat) -> (ResultPricing) query;
+  quoteDeployment : (text) -> (ResultPricing) query;
+  quoteTopUp : (nat) -> (ResultPricing) query;
   registerAuthorizedPaymentQuote : (nat, text, text, text) -> (ResultOrder);
   registerPaymentQuote : (nat, text, text) -> (ResultOrder);
   removeAdmin : (principal) -> (ResultUnit);
@@ -164,6 +189,7 @@ service : () -> {
   setPricingConfig : (PricingConfig) -> (ResultUnit);
   setSettlementConfig : (SettlementConfig) -> (ResultUnit);
   setSettlementRelayer : (principal) -> (ResultUnit);
+  setUsdPerTrillionCents : (nat) -> (ResultUnit);
   updateDeploymentOrderConfig : (nat, AppConfig) -> (ResultOrder);
   upsertTemplate : (Template) -> (ResultUnit);
 }

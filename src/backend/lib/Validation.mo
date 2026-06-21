@@ -311,12 +311,14 @@ module {
     };
   };
 
-  public func fundingMonths(value : Nat) : Result.Result<(), Text> {
-    if (value == 1 or value == 3 or value == 6) {
-      #ok(())
-    } else {
-      #err("Funding duration must be 1, 3, or 6 months.")
+  public func topUpCycles(value : Nat) : Result.Result<(), Text> {
+    if (value < 100_000_000_000) {
+      return #err("Top-up must be at least 0.1T cycles.");
     };
+    if (value > 3_000_000_000_000) {
+      return #err("Top-up cannot exceed 3T cycles per order.");
+    };
+    #ok(());
   };
 
   public func appConfig(config : Types.AppConfig) : Result.Result<(), Text> {

@@ -34,6 +34,13 @@ type FactoryDeployRequest = record {
   initialCycles : nat;
 };
 
+type FactoryTopUpRequest = record {
+  orderId : nat;
+  owner : principal;
+  canisterId : principal;
+  cycles : nat;
+};
+
 type FactoryDeployError = record {
   message : text;
   canisterId : opt principal;
@@ -90,10 +97,16 @@ type FactoryReadiness = record {
   canDeploy : bool;
 };
 
+type ChildCycleStatus = record {
+  cycles : nat;
+  idleCyclesBurnedPerDay : nat;
+};
+
 type ResultUnit = variant { ok; err : text };
 
 service : () -> {
   deployOrder : (FactoryDeployRequest) -> (FactoryDeployResult);
+  getChildCycleStatus : (principal) -> (ChildCycleStatus);
   getCycleBalance : () -> (nat) query;
   getDeployment : (nat) -> (opt FactoryDeployment) query;
   getOwner : () -> (principal) query;
@@ -101,6 +114,7 @@ service : () -> {
   getTemplateWasmInfo : () -> (
     record { configured : bool; hash : opt blob; size : nat }
   ) query;
+  topUpChild : (FactoryTopUpRequest) -> (ResultUnit);
   updateDeployment : (FactoryUpdateRequest) -> (FactoryUpdateResult);
   uploadTemplateWasm : (blob, blob) -> (ResultUnit);
 }

@@ -179,6 +179,30 @@ test("mock quotes can be canceled after owner authorization", async () => {
   }
 });
 
+test("cycles-rate endpoint returns a market-derived USD rate", async () => {
+  const port = 18_790;
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const fakeIcp = createFakeIcpCli();
+  const { server, output } = startRelayer(port, {
+    ICP_CLI: fakeIcp.executable,
+    NEAR_1CLICK_BASE_URL: "http://127.0.0.1:1",
+  });
+
+  try {
+    await waitForHealth(baseUrl, output);
+
+    const response = await fetch(`${baseUrl}/api/cycles-rate`);
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(typeof payload.usdPerTrillionCents, "number");
+    assert.ok(payload.usdPerTrillionCents > 0);
+    assert.equal(typeof payload.source, "string");
+  } finally {
+    await stopRelayer(server);
+    fakeIcp.cleanup();
+  }
+});
+
 test("CORS normalizes configured origins and handles preflight requests", async () => {
   const port = 18_788;
   const baseUrl = `http://127.0.0.1:${port}`;
