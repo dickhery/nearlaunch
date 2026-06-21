@@ -227,6 +227,218 @@ function html(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+const HEX_COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+function normalizeAccentColor(value: string): string {
+  const trimmed = value.trim();
+  if (HEX_COLOR_PATTERN.test(trimmed)) return trimmed;
+  if (/^[0-9a-fA-F]{6}$/.test(trimmed)) return `#${trimmed}`;
+  return trimmed;
+}
+
+function isValidAccentColor(value: string): boolean {
+  return HEX_COLOR_PATTERN.test(normalizeAccentColor(value));
+}
+
+function resolvePreviewConfig(
+  incoming: AppPreviewConfig,
+  fallback?: AppPreviewConfig,
+): AppPreviewConfig {
+  const accentColor = isValidAccentColor(incoming.accentColor)
+    ? normalizeAccentColor(incoming.accentColor)
+    : fallback && isValidAccentColor(fallback.accentColor)
+      ? normalizeAccentColor(fallback.accentColor)
+      : incoming.accentColor;
+  return { ...incoming, accentColor };
+}
+
+function isInlineImageUrl(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.length > 0 &&
+    trimmed.length <= MAX_INLINE_IMAGE_LENGTH &&
+    /^data:image\/(?:png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)
+  );
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value.trim()).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+const MAX_PROJECTS = 8;
+
+function emptyProject(): AppPreviewProject {
+  return { title: "", description: "", url: "", imageUrl: "", tags: [] };
+}
+
+function normalizeProject(project: AppPreviewProject): AppPreviewProject {
+  return {
+    title: project.title.trim(),
+    description: project.description.trim(),
+    url: project.url.trim(),
+    imageUrl: project.imageUrl.trim(),
+    tags: project.tags.map((tag) => tag.trim()).filter(Boolean).slice(0, 6),
+  };
+}
+
+function formatProjectTitleIssue(projectNumber: number, title: string): string {
+  if (title.length === 0) {
+    return `Project ${projectNumber}: add a title or remove this project.`;
+  }
+  const preview = title.length > 48 ? `${title.slice(0, 45)}...` : title;
+  return `Project ${projectNumber}: title must be between 1 and 80 characters (found ${title.length}: "${preview}").`;
+}
+
+function projectFieldValue(form: HTMLFormElement, index: string, suffix: string): string {
+  const field = form.elements.namedItem(`project-${index}-${suffix}`);
+  if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+    return field.value;
+  }
+  return "";
+}
+
+function projectCardHasContent(form: HTMLFormElement, index: string): boolean {
+  return Boolean(
+    projectFieldValue(form, index, "title").trim() ||
+      projectFieldValue(form, index, "description").trim() ||
+      projectFieldValue(form, index, "url").trim() ||
+      projectFieldValue(form, index, "tags").trim() ||
+      projectFieldValue(form, index, "imageUrl").trim(),
+  );
+}
+
+function projectsFromForm(form: HTMLFormElement): AppPreviewProject[] {
+  const cards = [...form.querySelectorAll<HTMLElement>("[data-project-card]")];
+  cards.sort(
+    (left, right) =>
+      Number(left.dataset.projectIndex || 0) - Number(right.dataset.projectIndex || 0),
+  );
+
+  const projects: AppPreviewProject[] = [];
+  for (const card of cards) {
+    const index = card.dataset.projectIndex;
+    if (!index) continue;
+    const project = normalizeProject({
+      title: projectFieldValue(form, index, "title"),
+      description: projectFieldValue(form, index, "description"),
+      url: projectFieldValue(form, index, "url"),
+      tags: splitList(projectFieldValue(form, index, "tags"), 6),
+      imageUrl: projectFieldValue(form, index, "imageUrl"),
+    });
+    if (!project.title && !projectCardHasContent(form, index)) continue;
+    projects.push(project);
+  }
+  return projects.slice(0, MAX_PROJECTS);
+}
+
+function validateProject(project: AppPreviewProject, projectNumber: number): string | null {
+  if (project.title.length === 0) {
+    return formatProjectTitleIssue(projectNumber, project.title);
+  }
+  if (project.title.length > 80) {
+    return formatProjectTitleIssue(projectNumber, project.title);
+  }
+  if (project.description.length > 500) {
+    return `Project ${projectNumber}: description must be 500 characters or fewer.`;
+  }
+  if (project.url && !isHttpsUrl(project.url)) {
+    return `Project ${projectNumber}: link must use https://.`;
+  }
+  if (project.imageUrl && !isHttpsUrl(project.imageUrl) && !isInlineImageUrl(project.imageUrl)) {
+    return `Project ${projectNumber}: image must use https:// or an uploaded PNG, JPEG, WebP, or GIF.`;
+  }
+  if (project.tags.length > 6) {
+    return `Project ${projectNumber}: use 6 tags or fewer.`;
+  }
+  for (const tag of project.tags) {
+    if (tag.length === 0 || tag.length > 32) {
+      return `Project ${projectNumber}: each tag must be between 1 and 32 characters.`;
+    }
+  }
+  return null;
+}
+
+function validateProjectsInForm(
+  form: HTMLFormElement,
+  projects: AppPreviewProject[],
+): string | null {
+  const cards = [...form.querySelectorAll<HTMLElement>("[data-project-card]")];
+  for (const [index, card] of cards.entries()) {
+    const projectIndex = card.dataset.projectIndex;
+    if (!projectIndex) continue;
+    const title = projectFieldValue(form, projectIndex, "title").trim();
+    if (!title && projectCardHasContent(form, projectIndex)) {
+      return formatProjectTitleIssue(index + 1, title);
+    }
+  }
+  if (projects.length > MAX_PROJECTS) {
+    return `Use ${MAX_PROJECTS} projects or fewer.`;
+  }
+  for (const [index, project] of projects.entries()) {
+    const projectError = validateProject(project, index + 1);
+    if (projectError) return projectError;
+  }
+  return null;
+}
+
+function validatePreviewConfig(config: AppPreviewConfig): string | null {
+  if (config.name.trim().length < 2 || config.name.trim().length > 80) {
+    return "App name must be between 2 and 80 characters.";
+  }
+  if (config.headline.trim().length < 4 || config.headline.trim().length > 140) {
+    return "Headline must be between 4 and 140 characters.";
+  }
+  if (
+    config.description.trim().length < 10 ||
+    config.description.trim().length > 1200
+  ) {
+    return "Description must be between 10 and 1,200 characters.";
+  }
+  if (!isValidAccentColor(config.accentColor)) {
+    return "Accent color must be a six-digit hex color.";
+  }
+  if (config.primaryLink.trim() && !isHttpsUrl(config.primaryLink)) {
+    return "Primary link must use https://.";
+  }
+  if (config.heroImageUrl.trim() && !isHttpsUrl(config.heroImageUrl) && !isInlineImageUrl(config.heroImageUrl)) {
+    return "Hero image must use https:// or an uploaded PNG, JPEG, WebP, or GIF.";
+  }
+  if (config.resumeUrl.trim() && !isHttpsUrl(config.resumeUrl)) {
+    return "Resume link must use https://.";
+  }
+  if (config.skills.length > 12) {
+    return "Use 12 skills or fewer.";
+  }
+  for (const skill of config.skills) {
+    if (skill.length === 0 || skill.length > 40) {
+      return "Each skill must be between 1 and 40 characters.";
+    }
+  }
+  if (config.socialLinks.length > 6) {
+    return "Use 6 social links or fewer.";
+  }
+  for (const link of config.socialLinks) {
+    if (link.labelText.length === 0 || link.labelText.length > 32) {
+      return "Each social link label must be between 1 and 32 characters.";
+    }
+    if (!isHttpsUrl(link.url)) {
+      return "Social links must use https://.";
+    }
+  }
+  if (config.projects.length > MAX_PROJECTS) {
+    return `Use ${MAX_PROJECTS} projects or fewer.`;
+  }
+  for (const [index, project] of config.projects.entries()) {
+    const projectError = validateProject(project, index + 1);
+    if (projectError) return projectError;
+  }
+  return null;
+}
+
 function splitList(value: string, limit: number): string[] {
   return value
     .split(/[\n,]/)
@@ -237,17 +449,19 @@ function splitList(value: string, limit: number): string[] {
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(image);
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Could not read that image file."));
+        return;
+      }
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error("Could not read that image file."));
+      image.src = reader.result;
     };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not read that image file."));
-    };
-    image.src = url;
+    reader.onerror = () => reject(new Error("Could not read that image file."));
+    reader.readAsDataURL(file);
   });
 }
 
@@ -303,45 +517,6 @@ function linksToText(links: AppPreviewLink[]): string {
   return links.map((link) => `${link.labelText} | ${link.url}`).join("\n");
 }
 
-function projectsFromText(value: string): AppPreviewProject[] {
-  return value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 8)
-    .map((line) => {
-      const [
-        title = "",
-        description = "",
-        url = "",
-        tags = "",
-        imageUrl = "",
-      ] = line.split("|").map((part) => part.trim());
-      return {
-        title,
-        description,
-        url,
-        imageUrl,
-        tags: splitList(tags, 6),
-      };
-    })
-    .filter((project) => project.title);
-}
-
-function projectsToText(projects: AppPreviewProject[]): string {
-  return projects
-    .map((project) =>
-      [
-        project.title,
-        project.description,
-        project.url,
-        project.tags.join(", "),
-        project.imageUrl,
-      ].join(" | "),
-    )
-    .join("\n");
-}
-
 type CanisterAppConfig = Omit<
   AppPreviewConfig,
   | "about"
@@ -360,6 +535,9 @@ type CanisterAppConfig = Omit<
 };
 
 function toCanisterConfig(config: AppPreviewConfig): CanisterAppConfig {
+  const projects = config.projects
+    .map(normalizeProject)
+    .filter((project) => project.title.length > 0 && project.title.length <= 80);
   return {
     ...config,
     about: config.about.trim() || undefined,
@@ -367,7 +545,7 @@ function toCanisterConfig(config: AppPreviewConfig): CanisterAppConfig {
     resumeUrl: config.resumeUrl.trim() || undefined,
     skills: config.skills.length > 0 ? config.skills : undefined,
     socialLinks: config.socialLinks.length > 0 ? config.socialLinks : undefined,
-    projects: config.projects.length > 0 ? config.projects : undefined,
+    projects: projects.length > 0 ? projects : undefined,
   };
 }
 
@@ -695,10 +873,167 @@ function renderAppPreview(
   `;
 }
 
+function renderAccentColorField(value: string): string {
+  const accentColor = isValidAccentColor(value) ? normalizeAccentColor(value) : "#2fbf8f";
+  return `
+    <label>Accent color
+      <div class="color-input-row">
+        <input name="accentColorPicker" type="color" value="${html(accentColor)}" aria-label="Pick accent color" />
+        <input name="accentColor" required pattern="#[0-9a-fA-F]{6}" value="${html(accentColor)}" />
+      </div>
+    </label>
+  `;
+}
+
+function renderProjectImageField(index: number, value: string): string {
+  const fieldName = `project-${index}-imageUrl`;
+  return `
+    <div class="image-field project-image-field">
+      <label>Project image
+        <input name="${fieldName}" type="text" placeholder="https://... or upload below" value="${html(value)}" />
+      </label>
+      <label class="file-picker">
+        <span>Upload</span>
+        <input data-image-upload="${fieldName}" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
+      </label>
+    </div>
+    <p class="field-help image-upload-status" data-image-status="${fieldName}">Optional preview image. Use HTTPS or upload a PNG, JPEG, WebP, or GIF.</p>
+  `;
+}
+
+function renderProjectCard(
+  index: number,
+  project: AppPreviewProject,
+  displayNumber: number,
+): string {
+  return `
+    <article class="project-editor-card" data-project-card data-project-index="${index}">
+      <div class="project-editor-heading">
+        <strong>Project ${displayNumber}</strong>
+        <button class="button ghost project-remove" type="button" data-remove-project="${index}">Remove</button>
+      </div>
+      <label>Title
+        <input name="project-${index}-title" maxlength="80" placeholder="Launch Console" value="${html(project.title)}" />
+      </label>
+      <label>Description
+        <textarea name="project-${index}-description" maxlength="500" rows="3" placeholder="A short summary of this project">${html(project.description)}</textarea>
+      </label>
+      <label>Project link
+        <input name="project-${index}-url" type="url" placeholder="https://example.com/project" value="${html(project.url)}" />
+      </label>
+      <label>Tags
+        <input name="project-${index}-tags" placeholder="ICP, TypeScript, Design" value="${html(project.tags.join(", "))}" />
+      </label>
+      ${renderProjectImageField(index, project.imageUrl)}
+    </article>
+  `;
+}
+
+function renderProjectsEditor(projects: AppPreviewProject[]): string {
+  const cards =
+    projects.length > 0
+      ? projects
+          .map((project, index) => renderProjectCard(index, project, index + 1))
+          .join("")
+      : `<p class="projects-empty">No projects yet. Add up to ${MAX_PROJECTS} pieces of work to feature on your portfolio.</p>`;
+
+  return `
+    <section class="projects-editor" data-projects-editor>
+      <div class="projects-editor-header">
+        <div>
+          <span class="section-label">Portfolio projects</span>
+          <p class="field-help">Optional highlighted work shown on your live app. Each project has its own fields — no special formatting required.</p>
+        </div>
+        <button class="button secondary project-add" type="button" data-add-project ${projects.length >= MAX_PROJECTS ? "disabled" : ""}>Add project</button>
+      </div>
+      <div class="projects-editor-list" data-projects-list>${cards}</div>
+    </section>
+  `;
+}
+
+function updateAddProjectButton(form: HTMLFormElement): void {
+  const button = form.querySelector<HTMLButtonElement>("[data-add-project]");
+  if (!button) return;
+  const count = form.querySelectorAll("[data-project-card]").length;
+  button.disabled = count >= MAX_PROJECTS;
+}
+
+function renumberProjectCards(form: HTMLFormElement): void {
+  form.querySelectorAll<HTMLElement>("[data-project-card]").forEach((card, index) => {
+    const heading = card.querySelector(".project-editor-heading strong");
+    if (heading) heading.textContent = `Project ${index + 1}`;
+  });
+}
+
+function addProjectToForm(form: HTMLFormElement, refreshPreview: () => void): void {
+  const list = form.querySelector("[data-projects-list]");
+  if (!list) return;
+
+  const cards = form.querySelectorAll("[data-project-card]");
+  if (cards.length >= MAX_PROJECTS) return;
+
+  form.querySelector(".projects-empty")?.remove();
+
+  const indices = [...cards].map((card) =>
+    Number((card as HTMLElement).dataset.projectIndex || 0),
+  );
+  const nextIndex = indices.length > 0 ? Math.max(...indices) + 1 : 0;
+
+  list.insertAdjacentHTML(
+    "beforeend",
+    renderProjectCard(nextIndex, emptyProject(), cards.length + 1),
+  );
+  updateAddProjectButton(form);
+  refreshPreview();
+}
+
+function removeProjectFromForm(
+  form: HTMLFormElement,
+  index: string | undefined,
+  refreshPreview: () => void,
+): void {
+  if (!index) return;
+  form
+    .querySelector(`[data-project-card][data-project-index="${index}"]`)
+    ?.remove();
+
+  const list = form.querySelector("[data-projects-list]");
+  const cards = form.querySelectorAll("[data-project-card]");
+  if (cards.length === 0 && list) {
+    list.innerHTML = `<p class="projects-empty">No projects yet. Add up to ${MAX_PROJECTS} pieces of work to feature on your portfolio.</p>`;
+  } else {
+    renumberProjectCards(form);
+  }
+  updateAddProjectButton(form);
+  refreshPreview();
+}
+
+function bindProjectsEditor(
+  form: HTMLFormElement,
+  refreshPreview: () => void,
+): void {
+  form.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+
+    if (target.closest("[data-add-project]")) {
+      event.preventDefault();
+      addProjectToForm(form, refreshPreview);
+      return;
+    }
+
+    const removeButton = target.closest<HTMLElement>("[data-remove-project]");
+    if (removeButton) {
+      event.preventDefault();
+      removeProjectFromForm(form, removeButton.dataset.removeProject, refreshPreview);
+    }
+  });
+}
+
 function renderHeroImageField(value: string): string {
   return `
     <div class="image-field">
-      <label>Hero/banner image<input name="heroImageUrl" type="url" placeholder="https://..." value="${html(value)}" /></label>
+      <label>Hero/banner image<input name="heroImageUrl" type="text" placeholder="https://... or upload below" value="${html(value)}" /></label>
       <label class="file-picker">
         <span>Upload image</span>
         <input data-image-upload="heroImageUrl" type="file" accept="image/png,image/jpeg,image/webp,image/gif" />
@@ -708,17 +1043,24 @@ function renderHeroImageField(value: string): string {
   `;
 }
 
-function renderLivePortfolioEditor(config: AppPreviewConfig): string {
+function renderLivePortfolioEditor(
+  config: AppPreviewConfig,
+  templateId: string,
+): string {
   return `
     <form class="live-config-form" id="live-config-form">
       <div class="form-heading">
         <div>
-          <span class="section-label">Portfolio admin</span>
-          <h4>Edit live portfolio</h4>
+          <span class="section-label">Live app admin</span>
+          <h4>Edit your deployed app</h4>
+          <p class="field-help">Changes publish directly to your live ICP app canister.</p>
         </div>
         <button class="button secondary" type="submit">Save live app</button>
       </div>
-      <label>Name<input name="name" required maxlength="80" value="${html(config.name)}" /></label>
+      <div class="field-row">
+        <label>Name<input name="name" required maxlength="80" value="${html(config.name)}" /></label>
+        ${renderAccentColorField(config.accentColor)}
+      </div>
       <label>Headline<input name="headline" required maxlength="140" value="${html(config.headline)}" /></label>
       <label>Description<textarea name="description" required maxlength="1200">${html(config.description)}</textarea></label>
       <label>About<textarea name="about" maxlength="2000">${html(config.about)}</textarea></label>
@@ -730,7 +1072,8 @@ function renderLivePortfolioEditor(config: AppPreviewConfig): string {
       <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(config.resumeUrl)}" /></label>
       <label>Skills<textarea name="skills" maxlength="500">${html(config.skills.join(", "))}</textarea></label>
       <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(config.socialLinks))}</textarea></label>
-      <label>Projects<textarea name="projects" maxlength="3000">${html(projectsToText(config.projects))}</textarea></label>
+      ${renderProjectsEditor(config.projects)}
+      ${renderAppPreview(config, templateId, "Updates as you edit", "live-preview-frame")}
     </form>
   `;
 }
@@ -772,12 +1115,16 @@ function renderCurrentOrder(): string {
         </div>
         <span class="status status-${status.toLowerCase()}">${html(statusLabel(status))}</span>
       </div>
-      ${renderAppPreview(
-        savedConfig,
-        currentOrder.templateId,
-        "Saved order configuration",
-        "order-preview-frame",
-      )}
+      ${
+        isLive
+          ? ""
+          : renderAppPreview(
+              savedConfig,
+              currentOrder.templateId,
+              "Saved order configuration",
+              "order-preview-frame",
+            )
+      }
       ${timeline(currentOrder)}
       <div class="order-facts">
         <div><small>Plan price</small><strong>${money(currentOrder.expectedAmountUsdCents)} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</strong></div>
@@ -901,7 +1248,11 @@ function renderCurrentOrder(): string {
           ? `<a class="live-link" href="${html(liveAppUrl)}" target="_blank" rel="noreferrer">Open live ICP app <span>^</span></a>`
           : ""
       }
-      ${isLive && currentOrder.createdCanisterId ? renderLivePortfolioEditor(savedConfig) : ""}
+      ${
+        isLive && currentOrder.createdCanisterId
+          ? renderLivePortfolioEditor(savedConfig, currentOrder.templateId)
+          : ""
+      }
       ${currentOrder.error ? `<p class="error-message">${html(currentOrder.error)}</p>` : ""}
     </article>
   `;
@@ -1080,6 +1431,9 @@ function renderAdmin(): string {
 function render(): void {
   const template = activeTemplate();
   const initialBreakdown = pricingBreakdown(template, selectedFundingMonths);
+  const managingOrder = currentOrder !== null;
+  const managingLiveApp =
+    currentOrder?.status === "Live" && Boolean(currentOrder.createdCanisterId);
   const canCreateOrder =
     signedIn &&
     publicConfig?.ordersEnabled &&
@@ -1151,7 +1505,7 @@ function render(): void {
           ${renderAvailability()}
           <div class="template-grid">${renderTemplateCards()}</div>
 
-          <div class="builder-grid">
+          <div class="builder-grid ${managingOrder ? "builder-grid--managing-order" : ""} ${managingLiveApp ? "builder-grid--live-app" : ""}">
             <form class="builder-form" id="launch-form">
               <div class="form-heading">
                 <span class="section-label">Configure ${html(template?.name || "app")}</span>
@@ -1159,7 +1513,7 @@ function render(): void {
               </div>
               <div class="field-row">
                 <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
-                <label>Accent color<input name="accentColor" required pattern="#[0-9a-fA-F]{6}" value="${html(draftConfig.accentColor)}" /></label>
+                ${renderAccentColorField(draftConfig.accentColor)}
               </div>
               <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
               <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
@@ -1172,7 +1526,7 @@ function render(): void {
               <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
               <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
               <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
-              <label>Projects<textarea name="projects" maxlength="3000">${html(projectsToText(draftConfig.projects))}</textarea></label>
+              ${renderProjectsEditor(draftConfig.projects)}
               ${renderAppPreview(
                 draftConfig,
                 selectedTemplate,
@@ -1207,7 +1561,15 @@ function render(): void {
               </button>
             </form>
             <aside class="order-pane">
-              <div class="pane-top"><span class="section-label">Live order state</span><span class="pulse"></span></div>
+              <div class="pane-top">
+                <span class="section-label">${managingLiveApp ? "Manage live app" : "Live order state"}</span>
+                <span class="pulse"></span>
+              </div>
+              ${
+                managingOrder
+                  ? `<button class="button ghost new-deployment-button" id="new-deployment-button" type="button">Configure new deployment</button>`
+                  : ""
+              }
               ${renderCurrentOrder()}
             </aside>
           </div>
@@ -1271,6 +1633,13 @@ function bindEvents(): void {
     });
   });
 
+  document.querySelector("#new-deployment-button")?.addEventListener("click", () => {
+    currentOrder = null;
+    currentQuote = null;
+    notice = "Configure a new deployment below.";
+    render();
+  });
+
   document.querySelector<HTMLFormElement>("#launch-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     if (event.currentTarget instanceof HTMLFormElement) {
@@ -1279,16 +1648,33 @@ function bindEvents(): void {
   });
   document
     .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-      "#launch-form input:not([name='fundingMonths']):not([type='file']), #launch-form textarea",
+      "#launch-form input:not([name='fundingMonths']):not([type='file']):not([name='accentColorPicker']), #launch-form textarea",
     )
     .forEach((field) => {
-      field.addEventListener("input", refreshDraftPreview);
+      field.addEventListener("input", () => {
+        const form = field.closest("form");
+        if (form instanceof HTMLFormElement) syncAccentColorFields(form);
+        refreshDraftPreview();
+      });
+    });
+  document
+    .querySelectorAll<HTMLInputElement>("#launch-form input[name='accentColorPicker']")
+    .forEach((field) => {
+      field.addEventListener("input", () => {
+        const form = field.closest("form");
+        if (form instanceof HTMLFormElement) syncAccentColorFields(form);
+        refreshDraftPreview();
+      });
     });
   document.querySelectorAll<HTMLInputElement>("#launch-form [data-image-upload]").forEach((field) => {
     field.addEventListener("change", () => {
       void handleImageUpload(field, refreshDraftPreview);
     });
   });
+  const launchForm = document.querySelector<HTMLFormElement>("#launch-form");
+  if (launchForm) {
+    bindProjectsEditor(launchForm, refreshDraftPreview);
+  }
 
   document.querySelectorAll<HTMLInputElement>('input[name="fundingMonths"]').forEach((input) => {
     input.addEventListener("change", () => updatePricingPreview(Number(input.value)));
@@ -1321,16 +1707,33 @@ function bindEvents(): void {
   });
   document
     .querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
-      "#live-config-form input:not([type='file']), #live-config-form textarea",
+      "#live-config-form input:not([type='file']):not([name='accentColorPicker']), #live-config-form textarea",
     )
     .forEach((field) => {
-      field.addEventListener("input", refreshLivePreview);
+      field.addEventListener("input", () => {
+        const form = field.closest("form");
+        if (form instanceof HTMLFormElement) syncAccentColorFields(form);
+        refreshLivePreview();
+      });
+    });
+  document
+    .querySelectorAll<HTMLInputElement>("#live-config-form input[name='accentColorPicker']")
+    .forEach((field) => {
+      field.addEventListener("input", () => {
+        const form = field.closest("form");
+        if (form instanceof HTMLFormElement) syncAccentColorFields(form);
+        refreshLivePreview();
+      });
     });
   document.querySelectorAll<HTMLInputElement>("#live-config-form [data-image-upload]").forEach((field) => {
     field.addEventListener("change", () => {
       void handleImageUpload(field, refreshLivePreview);
     });
   });
+  const liveConfigForm = document.querySelector<HTMLFormElement>("#live-config-form");
+  if (liveConfigForm) {
+    bindProjectsEditor(liveConfigForm, refreshLivePreview);
+  }
 
   document.querySelectorAll<HTMLElement>("[data-order]").forEach((row) => {
     row.addEventListener("click", () => {
@@ -1395,22 +1798,28 @@ function updatePricingPreview(months: number): void {
   if (details) details.innerHTML = renderPriceBreakdown(activeTemplate(), months);
 }
 
-function previewConfigFromForm(form: HTMLFormElement): AppPreviewConfig {
+function previewConfigFromForm(
+  form: HTMLFormElement,
+  fallback?: AppPreviewConfig,
+): AppPreviewConfig {
   const data = new FormData(form);
-  return {
-    name: String(data.get("name") || ""),
-    headline: String(data.get("headline") || ""),
-    description: String(data.get("description") || ""),
-    accentColor: String(data.get("accentColor") || ""),
-    primaryLink: String(data.get("primaryLink") || ""),
-    contact: String(data.get("contact") || ""),
-    about: String(data.get("about") || ""),
-    heroImageUrl: String(data.get("heroImageUrl") || ""),
-    resumeUrl: String(data.get("resumeUrl") || ""),
-    skills: splitList(String(data.get("skills") || ""), 12),
-    socialLinks: linksFromText(String(data.get("socialLinks") || "")),
-    projects: projectsFromText(String(data.get("projects") || "")),
-  };
+  return resolvePreviewConfig(
+    {
+      name: String(data.get("name") || ""),
+      headline: String(data.get("headline") || ""),
+      description: String(data.get("description") || ""),
+      accentColor: String(data.get("accentColor") || ""),
+      primaryLink: String(data.get("primaryLink") || ""),
+      contact: String(data.get("contact") || ""),
+      about: String(data.get("about") || ""),
+      heroImageUrl: String(data.get("heroImageUrl") || ""),
+      resumeUrl: String(data.get("resumeUrl") || ""),
+      skills: splitList(String(data.get("skills") || ""), 12),
+      socialLinks: linksFromText(String(data.get("socialLinks") || "")),
+      projects: projectsFromForm(form),
+    },
+    fallback,
+  );
 }
 
 function refreshDraftPreview(): void {
@@ -1426,13 +1835,30 @@ function refreshDraftPreview(): void {
 function refreshLivePreview(): void {
   const form = document.querySelector<HTMLFormElement>("#live-config-form");
   const frame = document.querySelector<HTMLIFrameElement>(
-    "#order-preview-frame",
+    "#live-preview-frame",
   );
   if (!form || !frame || !currentOrder) return;
+  const fallback = fromCanisterConfig(currentOrder.config as CanisterAppConfig);
   frame.srcdoc = appPreviewDocument(
-    previewConfigFromForm(form),
+    previewConfigFromForm(form, fallback),
     currentOrder.templateId,
   );
+}
+
+function syncAccentColorFields(form: HTMLFormElement): void {
+  const picker = form.elements.namedItem("accentColorPicker");
+  const accent = form.elements.namedItem("accentColor");
+  if (!(picker instanceof HTMLInputElement) || !(accent instanceof HTMLInputElement)) {
+    return;
+  }
+
+  if (document.activeElement === picker) {
+    accent.value = picker.value;
+    return;
+  }
+  if (HEX_COLOR_PATTERN.test(accent.value)) {
+    picker.value = accent.value;
+  }
 }
 
 async function handleImageUpload(
@@ -1642,7 +2068,16 @@ async function createOrder(form: HTMLFormElement): Promise<void> {
   await withBusy(async () => {
     if (!signedIn || !actor) throw new Error("Sign in before creating an order.");
     const data = new FormData(form);
+    syncAccentColorFields(form);
     draftConfig = previewConfigFromForm(form);
+    const projectsError = validateProjectsInForm(form, draftConfig.projects);
+    if (projectsError) {
+      throw new Error(projectsError);
+    }
+    const validationError = validatePreviewConfig(draftConfig);
+    if (validationError) {
+      throw new Error(validationError);
+    }
     const result = await actor.createDeploymentOrder({
       templateId: selectedTemplate,
       fundingMonths: BigInt(String(data.get("fundingMonths"))),
@@ -1798,7 +2233,18 @@ async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
       throw new Error("This deployment does not have a live app canister yet.");
     }
 
-    const nextConfig = previewConfigFromForm(form);
+    syncAccentColorFields(form);
+    const fallback = fromCanisterConfig(currentOrder.config as CanisterAppConfig);
+    const nextConfig = previewConfigFromForm(form, fallback);
+    const projectsError = validateProjectsInForm(form, nextConfig.projects);
+    if (projectsError) {
+      throw new Error(projectsError);
+    }
+    const validationError = validatePreviewConfig(nextConfig);
+    if (validationError) {
+      throw new Error(validationError);
+    }
+
     currentOrder = unwrapResult(
       await actor.updateDeploymentOrderConfig(
         currentOrder.id,

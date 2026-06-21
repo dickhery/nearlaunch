@@ -1,3 +1,4 @@
+import Array "mo:core/Array";
 import Char "mo:core/Char";
 import Principal "mo:core/Principal";
 import Result "mo:core/Result";
@@ -40,6 +41,41 @@ module {
       index += 1;
     };
     true;
+  };
+
+  func isWhitespace(char : Char) : Bool {
+    char == ' ' or char == '\n' or char == '\r' or char == '\t';
+  };
+
+  func trimWhitespace(value : Text) : Text {
+    value.trim(#predicate isWhitespace);
+  };
+
+  func isHexColorBody(color : Text) : Bool {
+    if (color.size() != 6) return false;
+    for (char in color.chars()) {
+      if (not isHexDigit(char)) return false;
+    };
+    true;
+  };
+
+  public func normalizeAccentColor(color : Text) : Text {
+    let trimmed = trimWhitespace(color);
+    if (isHexColor(trimmed)) return trimmed;
+    if (isHexColorBody(trimmed)) return "#" # trimmed;
+    trimmed;
+  };
+
+  public func resolveAppConfigForUpdate(
+    existing : Types.AppConfig,
+    incoming : Types.AppConfig,
+  ) : Types.AppConfig {
+    let accent = normalizeAccentColor(incoming.accentColor);
+    {
+      incoming with
+      accentColor = if (isHexColor(accent)) accent else existing.accentColor;
+      projects = dropEmptyProjects(incoming.projects);
+    };
   };
 
   func inlineImagePrefixLength(value : Text) : ?Nat {
@@ -197,18 +233,46 @@ module {
     };
   };
 
+  func normalizeProjectRecord(project : Types.PortfolioProject) : Types.PortfolioProject {
+    {
+      project with
+      title = trimWhitespace(project.title);
+      description = trimWhitespace(project.description);
+      url = trimWhitespace(project.url);
+      imageUrl = trimWhitespace(project.imageUrl);
+    };
+  };
+
+  func dropEmptyProjects(projects : ?[Types.PortfolioProject]) : ?[Types.PortfolioProject] {
+    switch (projects) {
+      case (null) null;
+      case (?items) {
+        let normalized = Array.map<Types.PortfolioProject, Types.PortfolioProject>(
+          items,
+          normalizeProjectRecord,
+        );
+        let kept = Array.filter<Types.PortfolioProject>(
+          normalized,
+          func (project) { project.title.size() > 0 },
+        );
+        if (kept.size() == 0) null else ?kept;
+      };
+    };
+  };
+
   func validateProject(project : Types.PortfolioProject) : Result.Result<(), Text> {
-    if (project.title.size() == 0 or project.title.size() > 80) {
+    let normalized = normalizeProjectRecord(project);
+    if (normalized.title.size() == 0 or normalized.title.size() > 80) {
       return #err("Each project title must be between 1 and 80 characters.");
     };
-    if (project.description.size() > 500) {
+    if (normalized.description.size() > 500) {
       return #err("Each project description must be 500 characters or fewer.");
     };
-    switch (requireHttpsUrl(project.url, "Project link")) {
+    switch (requireHttpsUrl(normalized.url, "Project link")) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
-    switch (requireImageUrl(project.imageUrl, "Project image")) {
+    switch (requireImageUrl(normalized.imageUrl, "Project image")) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
@@ -271,7 +335,8 @@ module {
     if (config.primaryLink.size() > 240 or config.contact.size() > 160) {
       return #err("Link or contact value is too long.");
     };
-    if (not isHexColor(config.accentColor)) {
+    let accentColor = normalizeAccentColor(config.accentColor);
+    if (not isHexColor(accentColor)) {
       return #err("Accent color must be a six-digit hex color.");
     };
     if (
@@ -300,7 +365,7 @@ module {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
-    switch (validateProjects(config.projects)) {
+    switch (validateProjects(dropEmptyProjects(config.projects))) {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };

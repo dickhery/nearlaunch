@@ -59,12 +59,25 @@ shared (install) actor class LauncherFactory() = Self {
     updateConfigForOwner : shared (Principal, Types.AppConfig) -> async ();
   };
 
+  type WasmMemoryPersistence = { #keep; #replace };
+
+  type UpgradeOptions = {
+    skip_pre_upgrade : ?Bool;
+    wasm_memory_persistence : ?WasmMemoryPersistence;
+  };
+
+  type CanisterInstallMode = {
+    #install;
+    #reinstall;
+    #upgrade : ?UpgradeOptions;
+  };
+
   transient let ic : actor {
     create_canister : shared ({ settings : ?CanisterSettings }) -> async CreateCanisterResult;
     canister_status : shared ({ canister_id : Principal }) -> async CanisterStatus;
     deposit_cycles : shared ({ canister_id : Principal }) -> async ();
     install_code : shared ({
-      mode : { #install; #reinstall; #upgrade };
+      mode : CanisterInstallMode;
       canister_id : Principal;
       wasm_module : Blob;
       arg : Blob;
@@ -97,6 +110,52 @@ shared (install) actor class LauncherFactory() = Self {
 
   func updateFailure(message : Text, canisterId : ?Principal) : Types.FactoryUpdateResult {
     #err({ message; canisterId });
+  };
+
+  func upgradeOptionsKeep() : ?UpgradeOptions {
+    ?{
+      skip_pre_upgrade = null;
+      wasm_memory_persistence = ?#keep;
+    };
+  };
+
+  func childNeedsWasmUpgrade(canisterId : Principal) : async Bool {
+    switch (appWasmHash) {
+      case (?expectedHash) {
+        let status = await ic.canister_status({ canister_id = canisterId });
+        switch (status.module_hash) {
+          case (?moduleHash) moduleHash != expectedHash;
+          case (null) true;
+        };
+      };
+      case (null) true;
+    };
+  };
+
+  func installChildCode(
+    canisterId : Principal,
+    mode : CanisterInstallMode,
+    wasm : Blob,
+    arg : Blob,
+  ) : async () {
+    await ic.install_code({
+      mode;
+      canister_id = canisterId;
+      wasm_module = wasm;
+      arg;
+    });
+  };
+
+  func pushLiveConfig(
+    request : Types.FactoryUpdateRequest,
+    child : ChildApp,
+  ) : async Result.Result<(), Text> {
+    try {
+      await child.updateConfigForOwner(request.owner, request.config);
+      #ok(());
+    } catch (configError) {
+      #err("Live config update failed: " # configError.message());
+    };
   };
 
   func childCycleTarget(requestedCycles : Nat) : Nat {
@@ -387,22 +446,42 @@ shared (install) actor class LauncherFactory() = Self {
         },
       );
 
-      let initArg = to_candid ({
-        owner = request.owner;
-        templateId = request.templateId;
-        config = request.config;
-      } : Types.ChildInit);
+      let child : ChildApp = actor (request.canisterId.toText());
+      let needsWasmUpgrade = await childNeedsWasmUpgrade(request.canisterId);
 
-      var reinstalled = false;
-      try {
-        await ic.install_code({
-          mode = #upgrade;
-          canister_id = request.canisterId;
-          wasm_module = wasm;
-          arg = initArg;
-        });
-      } catch (upgradeError) {
-        if (not request.allowReinstall) {
+      if (not needsWasmUpgrade) {
+        switch (await pushLiveConfig(request, child)) {
+          case (#err(message)) {
+            deployments.add(
+              request.orderId,
+              {
+                orderId = request.orderId;
+                owner = request.owner;
+                templateId = request.templateId;
+                status = #Failed;
+                canisterId = ?request.canisterId;
+                error = ?message;
+              },
+            );
+            return updateFailure(message, ?request.canisterId);
+          };
+          case (#ok(())) {};
+        };
+      } else {
+        let initArg = to_candid ({
+          owner = request.owner;
+          templateId = request.templateId;
+          config = request.config;
+        } : Types.ChildInit);
+
+        try {
+          await installChildCode(
+            request.canisterId,
+            #upgrade(upgradeOptionsKeep()),
+            wasm,
+            initArg,
+          );
+        } catch (upgradeError) {
           let message = "Template upgrade failed: " # upgradeError.message();
           deployments.add(
             request.orderId,
@@ -418,51 +497,22 @@ shared (install) actor class LauncherFactory() = Self {
           return updateFailure(message, ?request.canisterId);
         };
 
-        try {
-          await ic.install_code({
-            mode = #reinstall;
-            canister_id = request.canisterId;
-            wasm_module = wasm;
-            arg = initArg;
-          });
-          reinstalled := true;
-        } catch (reinstallError) {
-          let message =
-            "Template upgrade failed (" # upgradeError.message() #
-            ") and reinstall failed: " # reinstallError.message();
-          deployments.add(
-            request.orderId,
-            {
-              orderId = request.orderId;
-              owner = request.owner;
-              templateId = request.templateId;
-              status = #Failed;
-              canisterId = ?request.canisterId;
-              error = ?message;
-            },
-          );
-          return updateFailure(message, ?request.canisterId);
-        };
-      };
-
-      if (not reinstalled) {
-        let child : ChildApp = actor (request.canisterId.toText());
-        try {
-          await child.updateConfigForOwner(request.owner, request.config);
-        } catch (configError) {
-          let message = "Template upgraded, but live config update failed: " # configError.message();
-          deployments.add(
-            request.orderId,
-            {
-              orderId = request.orderId;
-              owner = request.owner;
-              templateId = request.templateId;
-              status = #Failed;
-              canisterId = ?request.canisterId;
-              error = ?message;
-            },
-          );
-          return updateFailure(message, ?request.canisterId);
+        switch (await pushLiveConfig(request, child)) {
+          case (#err(message)) {
+            deployments.add(
+              request.orderId,
+              {
+                orderId = request.orderId;
+                owner = request.owner;
+                templateId = request.templateId;
+                status = #Failed;
+                canisterId = ?request.canisterId;
+                error = ?message;
+              },
+            );
+            return updateFailure(message, ?request.canisterId);
+          };
+          case (#ok(())) {};
         };
       };
 
@@ -477,7 +527,7 @@ shared (install) actor class LauncherFactory() = Self {
           error = null;
         },
       );
-      #ok(if (reinstalled) #Reinstalled else #Upgraded);
+      #ok(#Upgraded);
     } catch (error) {
       let message = "Live app update failed: " # error.message();
       deployments.add(

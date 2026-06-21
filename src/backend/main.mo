@@ -695,10 +695,6 @@ shared (install) actor class LauncherBackend() {
       case (#err(message)) return #err(message);
       case (#ok(())) {};
     };
-    switch (Validation.appConfig(config)) {
-      case (#err(message)) return #err(message);
-      case (#ok(())) {};
-    };
 
     let order = getOrderOrTrap(orderId);
     if (caller != order.owner) return #err("Caller does not own this order.");
@@ -711,14 +707,20 @@ shared (install) actor class LauncherBackend() {
       case (null) return #err("This live deployment is missing its app canister ID.");
     };
 
+    let resolvedConfig = Validation.resolveAppConfigForUpdate(order.config, config);
+    switch (Validation.appConfig(resolvedConfig)) {
+      case (#err(message)) return #err(message);
+      case (#ok(())) {};
+    };
+
     let factoryResult = try {
       await factory.updateDeployment({
         orderId;
         owner = order.owner;
         templateId = order.templateId;
         canisterId;
-        config;
-        allowReinstall = true;
+        config = resolvedConfig;
+        allowReinstall = false;
       });
     } catch (error) {
       #err({
@@ -741,7 +743,7 @@ shared (install) actor class LauncherBackend() {
 
     let updated = {
       order with
-      config;
+      config = resolvedConfig;
       error = null;
     };
     orders.add(orderId, updated);

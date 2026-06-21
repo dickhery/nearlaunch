@@ -269,6 +269,20 @@ footer {
   color: var(--ink);
 }
 
+.button.ghost {
+  min-height: auto;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 10px;
+  font-size: 0.72rem;
+}
+
+.button.ghost:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .button.wide {
   width: 100%;
 }
@@ -543,6 +557,24 @@ footer {
   margin-top: 32px;
   border: 1px solid var(--line);
   background: var(--panel);
+}
+
+.builder-grid--managing-order {
+  grid-template-columns: 1fr;
+}
+
+.builder-grid--managing-order .builder-form {
+  display: none;
+}
+
+.builder-grid--live-app .order-pane {
+  border-left: 0;
+}
+
+.new-deployment-button {
+  margin-bottom: 18px;
+  padding: 0;
+  color: var(--accent);
 }
 
 .builder-form,
@@ -930,6 +962,97 @@ textarea {
 .live-config-form h4 {
   margin: 6px 0 0;
   font-size: 1.1rem;
+}
+
+.color-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.color-input-row input[type="color"] {
+  width: 48px;
+  min-width: 48px;
+  height: 42px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.color-input-row input[name="accentColor"] {
+  flex: 1;
+}
+
+.projects-editor {
+  margin-top: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 20px;
+}
+
+.projects-editor-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.projects-editor-header .field-help {
+  margin-top: 8px;
+}
+
+.projects-editor-list {
+  display: grid;
+  gap: 16px;
+}
+
+.projects-empty {
+  margin: 0;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.project-editor-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0b0f11;
+  padding: 18px;
+}
+
+.project-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.project-editor-heading strong {
+  color: var(--green);
+  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.project-editor-card label {
+  display: block;
+  margin-top: 18px;
+}
+
+.project-editor-card textarea {
+  min-height: 88px;
+}
+
+.project-image-field {
+  margin-top: 18px;
 }
 
 .payment-panel,
@@ -1523,6 +1646,7 @@ button[data-busy-disabled="true"] {
 
   .field-row,
   .image-field,
+  .projects-editor-header,
   .order-facts,
   .admin-grid,
   .admin-status-grid,
