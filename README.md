@@ -11,16 +11,30 @@ cycles and the user's principal installed as a controller.
 - `launcher_backend`: templates, fixed-price orders, settlement proofs, and
   deployment status. It also stores pricing, payment labels, order availability,
   canceled-order audit state, and the web-admin allowlist.
-- `launcher_factory`: holds approved child Wasm, creates canisters, funds them
-  with cycles, and installs the selected configuration.
+- `launcher_factory`: holds approved child Wasm (app template + asset canister),
+  creates canisters, funds them with cycles, and installs the selected configuration.
 - `app_template`: the generated Motoko landing-page canister.
+- `static-site` template: after payment, the factory installs the certified asset
+  canister Wasm and the browser uploads the user's HTML/CSS/JS package with the
+  order owner as controller.
 - `relayer/server.mjs`: an off-chain Node service that keeps the NEAR 1Click
   credential secret and is the only principal authorized to confirm payment.
 
 NEAR Intents does not currently settle directly to ICP. The implemented flow
-uses NEAR 1Click to swap the user's source token into the configured treasury
-asset. After a successful swap, the relayer records a replay-safe settlement
-proof on ICP and the factory spends its prefunded cycles to create the app.
+uses NEAR 1Click (`EXACT_OUTPUT`) to quote the user's selected source token and
+deliver the fixed treasury amount (default: native NEAR USDC). After a successful
+swap, the relayer records a replay-safe settlement proof on ICP and the factory
+spends its prefunded cycles to create the app. Users can pay with any 1Click
+supported token, including the settlement asset itself.
+
+### Static site uploads
+
+Folder picks use the browser `webkitdirectory` API, which prefixes every path
+with the selected folder name. NearLaunch strips that shared root so
+`my-site/index.html` is published as `/index.html` on the child asset canister.
+If the browser tab is refreshed after order creation, re-select the package on
+the order card before deployment — file bytes are not stored on-chain until
+upload.
 
 ## Prerequisites
 

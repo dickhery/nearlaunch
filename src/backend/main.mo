@@ -36,42 +36,90 @@ shared (install) actor class LauncherBackend() {
   var ordersEnabled = true;
   let admins = Set.empty<Principal>();
 
-  let templates = do {
+  func defaultPortfolioTemplate() : Types.Template {
+    {
+      id = "portfolio";
+      name = "Portfolio Plus";
+      description = "A multi-section portfolio with skills, socials, project cards, resume, and owner-managed content.";
+      category = "Personal";
+      basePriceUsdCents = 700;
+      active = true;
+    };
+  };
+
+  func defaultStartupTemplate() : Types.Template {
+    {
+      id = "startup";
+      name = "Startup landing page";
+      description = "A conversion-oriented product page with a clear call to action.";
+      category = "Business";
+      basePriceUsdCents = 500;
+      active = true;
+    };
+  };
+
+  func defaultStaticSiteTemplate() : Types.Template {
+    {
+      id = "static-site";
+      name = "Static site";
+      description = "Upload your own HTML, CSS, JavaScript, and assets to host a certified static website on ICP.";
+      category = "Custom";
+      basePriceUsdCents = 500;
+      active = true;
+    };
+  };
+
+  func defaultTemplateRegistry() : Map.Map<Text, Types.Template> {
     let registry = Map.empty<Text, Types.Template>();
-    registry.add(
-      "portfolio",
-      {
-        id = "portfolio";
-        name = "Portfolio Plus";
-        description = "A multi-section portfolio with skills, socials, project cards, resume, and owner-managed content.";
-        category = "Personal";
-        basePriceUsdCents = 700;
-        active = true;
-      },
-    );
-    registry.add(
-      "startup",
-      {
-        id = "startup";
-        name = "Startup landing page";
-        description = "A conversion-oriented product page with a clear call to action.";
-        category = "Business";
-        basePriceUsdCents = 500;
-        active = true;
-      },
-    );
-    registry.add(
-      "static-site",
-      {
-        id = "static-site";
-        name = "Static site";
-        description = "Upload your own HTML, CSS, JavaScript, and assets to host a certified static website on ICP.";
-        category = "Custom";
-        basePriceUsdCents = 500;
-        active = true;
-      },
-    );
+    registry.add("portfolio", defaultPortfolioTemplate());
+    registry.add("startup", defaultStartupTemplate());
+    registry.add("static-site", defaultStaticSiteTemplate());
     registry;
+  };
+
+  func ensureTemplateCatalog() {
+    templates.remove("grant");
+
+    let portfolioTemplate = switch (templates.get("portfolio")) {
+      case (?existing) {
+        if (existing.name == "Portfolio" or existing.basePriceUsdCents == 400) {
+          let defaults = defaultPortfolioTemplate();
+          {
+            defaults with
+            basePriceUsdCents = existing.basePriceUsdCents;
+            active = existing.active;
+          };
+        } else {
+          existing;
+        };
+      };
+      case (null) defaultPortfolioTemplate();
+    };
+    templates.add("portfolio", portfolioTemplate);
+
+    switch (templates.get("startup")) {
+      case (?existing) templates.add("startup", existing);
+      case (null) templates.add("startup", defaultStartupTemplate());
+    };
+
+    let staticSiteTemplate = switch (templates.get("static-site")) {
+      case (?existing) {
+        let defaults = defaultStaticSiteTemplate();
+        {
+          defaults with
+          basePriceUsdCents = existing.basePriceUsdCents;
+          active = existing.active;
+        };
+      };
+      case (null) defaultStaticSiteTemplate();
+    };
+    templates.add("static-site", staticSiteTemplate);
+  };
+
+  var templates = defaultTemplateRegistry();
+
+  system func postupgrade() {
+    ensureTemplateCatalog();
   };
 
   let orders = Map.empty<Nat, Types.DeploymentOrder>();

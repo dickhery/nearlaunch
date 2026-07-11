@@ -1779,9 +1779,43 @@ button[data-busy-disabled="true"] {
   }
 }
 
+.template-card--static-site {
+  border-color: rgba(121, 242, 192, 0.35);
+}
+
+.template-badge {
+  display: inline-flex;
+  align-self: flex-start;
+  margin-bottom: 4px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(121, 242, 192, 0.14);
+  color: var(--green);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.static-site-intro {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.static-site-intro p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
 .static-site-upload {
   display: grid;
   gap: 12px;
+}
+
+.file-picker.secondary-picker {
+  background: transparent;
 }
 
 .file-picker.wide {
@@ -1826,4 +1860,14 @@ button[data-busy-disabled="true"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.static-site-order-files,
+.static-site-reattach {
+  display: grid;
+  gap: 12px;
+}
+
+.static-site-reattach {
+  margin-top: 4px;
 }

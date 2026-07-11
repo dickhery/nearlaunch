@@ -28,6 +28,7 @@ import {
 import {
   formatStaticSiteSize,
   isStaticSiteTemplate,
+  planStaticSiteFiles,
   uploadStaticSiteFiles,
   validateStaticSiteFiles,
 } from "./staticSite";
@@ -799,11 +800,15 @@ function renderTemplateCards(): string {
           ? deployBreakdown.totalUsdCents
           : template.basePriceUsdCents +
             (publicConfig?.pricing.serviceFeeUsdCents || 0n);
+      const uploadBadge = isStaticSiteTemplate(template.id)
+        ? `<span class="template-badge">Upload files</span>`
+        : "";
       return `
-        <button class="template-card ${template.id === selectedTemplate ? "selected" : ""}"
+        <button class="template-card ${template.id === selectedTemplate ? "selected" : ""} ${isStaticSiteTemplate(template.id) ? "template-card--static-site" : ""}"
           data-template="${html(template.id)}" type="button">
           <span class="template-index">0${index + 1}</span>
           <span class="template-category">${html(template.category)}</span>
+          ${uploadBadge}
           <strong>${html(template.name)}</strong>
           <p>${html(template.description)}</p>
           <span class="template-price">from ${money(minimum)} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
@@ -1223,10 +1228,7 @@ function renderCurrentOrder(): string {
         isLive || topUpOrder
           ? ""
           : isStaticSiteTemplate(currentOrder.templateId)
-            ? renderStaticSiteFileList(
-                staticSiteFilesByOrderId.get(currentOrder.id) || [],
-                "order-static-site-file-list",
-              )
+            ? renderStaticSiteOrderFiles(currentOrder)
             : renderAppPreview(
                 savedConfig,
                 currentOrder.templateId,
@@ -1263,15 +1265,14 @@ function renderCurrentOrder(): string {
                 Token you will send
                 <select id="origin-asset">
                   ${tokens
-                    .filter(
-                      (token) =>
-                        token.assetId !== settlementAsset,
-                    )
                     .slice(0, 120)
-                    .map(
-                      (token) =>
-                        `<option value="${html(token.assetId)}">${html(token.symbol)} on ${html(token.blockchain)}</option>`,
-                    )
+                    .map((token) => {
+                      const isSettlement = token.assetId === settlementAsset;
+                      const label = isSettlement
+                        ? `${token.symbol} on ${token.blockchain} (settlement asset)`
+                        : `${token.symbol} on ${token.blockchain}`;
+                      return `<option value="${html(token.assetId)}">${html(label)}</option>`;
+                    })
                     .join("")}
                 </select>
               </label>
@@ -1340,7 +1341,9 @@ function renderCurrentOrder(): string {
                   : "Retry deployment"
                 : topUpOrder
                   ? "Apply cycle top-up"
-                  : "Deploy app on ICP"
+                  : isStaticSiteTemplate(currentOrder.templateId)
+                    ? "Deploy static site on ICP"
+                    : "Deploy app on ICP"
             }</button>`
           : ""
       }
@@ -1447,23 +1450,34 @@ function renderStaticSiteFileList(files: File[], listId: string): string {
     return `<p class="field-help" id="${listId}">No files selected yet. Include an <code>index.html</code> at the project root.</p>`;
   }
 
-  const preview = files
+  let plan;
+  try {
+    plan = planStaticSiteFiles(files);
+  } catch {
+    plan = files.map((file) => ({
+      source: file,
+      relativePath: file.webkitRelativePath || file.name,
+      assetPath: `/${file.name}`,
+    }));
+  }
+
+  const preview = plan
     .slice(0, 12)
-    .map((file) => {
-      const path = file.webkitRelativePath || file.name;
-      return `<li><code>${html(path)}</code><span>${formatStaticSiteSize(file.size)}</span></li>`;
-    })
+    .map(
+      (entry) =>
+        `<li><code>${html(entry.assetPath)}</code><span>${formatStaticSiteSize(entry.source.size)}</span></li>`,
+    )
     .join("");
 
   const overflow =
-    files.length > 12
-      ? `<li class="muted">+ ${files.length - 12} more files</li>`
+    plan.length > 12
+      ? `<li class="muted">+ ${plan.length - 12} more files</li>`
       : "";
 
   return `
     <div class="static-site-files" id="${listId}">
       <div class="static-site-files-heading">
-        <strong>${files.length} files</strong>
+        <strong>${plan.length} files</strong>
         <span>${formatStaticSiteSize(staticSiteTotalBytes(files))}</span>
       </div>
       <ul>${preview}${overflow}</ul>
@@ -1471,15 +1485,57 @@ function renderStaticSiteFileList(files: File[], listId: string): string {
   `;
 }
 
+function renderStaticSiteOrderFiles(order: DeploymentOrder): string {
+  const files = staticSiteFilesByOrderId.get(order.id) || [];
+  const needsFiles =
+    files.length === 0 &&
+    (order.status === "AwaitingPayment" ||
+      order.status === "PaymentDetected" ||
+      order.status === "Failed");
+
+  return `
+    <div class="static-site-order-files">
+      ${renderStaticSiteFileList(files, "order-static-site-file-list")}
+      ${
+        needsFiles
+          ? `
+            <div class="static-site-reattach">
+              <p class="inline-warning">Project files are not in this browser tab. Re-select the same package before deployment so they can be published to your canister.</p>
+              <label class="file-picker wide">
+                <span>Re-select project files</span>
+                <input id="static-site-order-files" type="file" multiple webkitdirectory directory />
+              </label>
+              <label class="file-picker wide secondary-picker">
+                <span>Or choose individual files</span>
+                <input id="static-site-order-files-flat" type="file" multiple />
+              </label>
+            </div>
+          `
+          : files.length > 0
+            ? `<p class="field-help">These files stay in this tab until deployment finishes. Folder uploads are normalized so <code>index.html</code> lands at the canister root.</p>`
+            : ""
+      }
+    </div>
+  `;
+}
+
 function renderStaticSiteBuilder(): string {
   return `
+    <div class="static-site-intro">
+      <span class="section-label">Bring your own site</span>
+      <p>Upload a built static project (HTML, CSS, JS, images). After payment, NearLaunch creates an asset canister and publishes your files to <code>https://&lt;canister-id&gt;.icp0.io</code>.</p>
+    </div>
     <label>Site name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
     <div class="static-site-upload">
       <label class="file-picker wide">
-        <span>Choose project folder or files</span>
-        <input id="static-site-files" type="file" multiple webkitdirectory directory />
+        <span>Choose project folder</span>
+        <input id="static-site-folder" type="file" multiple webkitdirectory directory />
       </label>
-      <p class="field-help">Upload a built static site folder. Your package must include <code>index.html</code>. Keep this tab open until deployment finishes.</p>
+      <label class="file-picker wide secondary-picker">
+        <span>Or choose individual files</span>
+        <input id="static-site-files" type="file" multiple />
+      </label>
+      <p class="field-help">Your package must include <code>index.html</code> at the site root. If you pick a project folder, NearLaunch strips the folder name so files publish at <code>/</code> on your canister. Keep this browser tab open until payment, deployment, and file upload finish.</p>
       ${renderStaticSiteFileList(staticSiteFiles, "static-site-file-list")}
     </div>
   `;
@@ -1696,7 +1752,7 @@ function render(): void {
           <div class="section-intro">
             <span class="section-number">01</span>
             <div><span class="kicker">Choose the outcome</span><h2>What are we launching?</h2></div>
-            <p>Every template is an approved Wasm path. Users configure content; the factory controls what code can be installed.</p>
+            <p>Pick a curated template or upload your own static site files. The factory installs approved Wasm and hosts your project on ICP.</p>
           </div>
           ${renderAvailability()}
           <div class="template-grid">${renderTemplateCards()}</div>
@@ -1750,7 +1806,9 @@ function render(): void {
                         : !factoryCanDeploy()
                           ? "Factory needs more cycles"
                       : publicConfig?.ordersEnabled
-                        ? "Create deployment order"
+                        ? isStaticSiteTemplate(selectedTemplate)
+                          ? "Create static site order"
+                          : "Create deployment order"
                         : "New orders are paused"
                     : "Sign in to create an order"
                 }
@@ -1874,10 +1932,8 @@ function bindEvents(): void {
   if (launchForm) {
     bindProjectsEditor(launchForm, refreshDraftPreview);
   }
-  document.querySelector<HTMLInputElement>("#static-site-files")?.addEventListener("change", (event) => {
-    const input = event.currentTarget;
-    if (!(input instanceof HTMLInputElement)) return;
-    staticSiteFiles = [...input.files || []];
+  const syncStaticSiteSelection = (files: FileList | null | undefined) => {
+    staticSiteFiles = [...files || []];
     const nameField = document.querySelector<HTMLInputElement>("#launch-form input[name='name']");
     const siteName = nameField?.value.trim() || "My static site";
     draftConfig = staticSiteConfigFromDraft(siteName, staticSiteFiles);
@@ -1885,6 +1941,14 @@ function bindEvents(): void {
     if (list) {
       list.outerHTML = renderStaticSiteFileList(staticSiteFiles, "static-site-file-list");
     }
+  };
+  document.querySelector<HTMLInputElement>("#static-site-folder")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (input instanceof HTMLInputElement) syncStaticSiteSelection(input.files);
+  });
+  document.querySelector<HTMLInputElement>("#static-site-files")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (input instanceof HTMLInputElement) syncStaticSiteSelection(input.files);
   });
   document.querySelector<HTMLFormElement>("#live-static-site-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -1898,6 +1962,27 @@ function bindEvents(): void {
     if (list) {
       list.outerHTML = renderStaticSiteFileList(staticSiteLiveFiles, "static-site-live-file-list");
     }
+  });
+  const attachOrderStaticSiteFiles = (files: FileList | null | undefined) => {
+    if (!currentOrder || !isStaticSiteTemplate(currentOrder.templateId)) return;
+    const nextFiles = [...files || []];
+    const validationError = validateStaticSiteFiles(nextFiles);
+    if (validationError) {
+      notice = validationError;
+      render();
+      return;
+    }
+    staticSiteFilesByOrderId.set(currentOrder.id, nextFiles);
+    notice = `Attached ${nextFiles.length} files to order #${currentOrder.id.toString()}.`;
+    render();
+  };
+  document.querySelector<HTMLInputElement>("#static-site-order-files")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (input instanceof HTMLInputElement) attachOrderStaticSiteFiles(input.files);
+  });
+  document.querySelector<HTMLInputElement>("#static-site-order-files-flat")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (input instanceof HTMLInputElement) attachOrderStaticSiteFiles(input.files);
   });
 
   document.querySelectorAll<HTMLInputElement>('input[name="topUpCycles"]').forEach((input) => {
@@ -2503,8 +2588,12 @@ async function deployCurrentOrder(): Promise<void> {
     const uploadFiles = staticSiteFilesByOrderId.get(orderId) || [];
     if (staticSiteDeploy && uploadFiles.length === 0) {
       throw new Error(
-        "Project files are no longer available in this browser tab. Choose your files again and create a new order.",
+        "Project files are not available in this browser tab. Re-select your site package on this order, then deploy again.",
       );
+    }
+    if (staticSiteDeploy) {
+      const filesError = validateStaticSiteFiles(uploadFiles);
+      if (filesError) throw new Error(filesError);
     }
 
     currentOrder = unwrapResult(await actor.deployPaidOrder(orderId));
@@ -2761,13 +2850,30 @@ async function loadTokens(): Promise<void> {
     const response = await fetch(`${RELAYER_URL}/api/tokens`);
     if (!response.ok) return;
     const payload = (await response.json()) as { tokens: Token[] };
-    const preferred = ["near", "eth", "base", "arb", "sol", "btc"];
+    const preferredChains = ["near", "eth", "base", "arb", "sol", "btc"];
+    const preferredSymbols = ["USDC", "USDT", "wNEAR", "NEAR", "ETH", "WETH", "SOL", "BTC"];
+    const settlementAsset = publicConfig?.settlement.assetId;
     tokens = payload.tokens
-      .filter((token) => token.price > 0)
+      .filter((token) => typeof token.assetId === "string" && token.assetId.length > 0)
       .sort((a, b) => {
-        const aRank = preferred.indexOf(a.blockchain);
-        const bRank = preferred.indexOf(b.blockchain);
-        return (aRank < 0 ? 99 : aRank) - (bRank < 0 ? 99 : bRank);
+        // Prefer the configured settlement asset so users can pay in the same token.
+        if (settlementAsset) {
+          if (a.assetId === settlementAsset && b.assetId !== settlementAsset) return -1;
+          if (b.assetId === settlementAsset && a.assetId !== settlementAsset) return 1;
+        }
+        const aSymbol = preferredSymbols.indexOf(a.symbol);
+        const bSymbol = preferredSymbols.indexOf(b.symbol);
+        if (aSymbol !== bSymbol) {
+          return (aSymbol < 0 ? 99 : aSymbol) - (bSymbol < 0 ? 99 : bSymbol);
+        }
+        const aChain = preferredChains.indexOf(a.blockchain);
+        const bChain = preferredChains.indexOf(b.blockchain);
+        if (aChain !== bChain) {
+          return (aChain < 0 ? 99 : aChain) - (bChain < 0 ? 99 : bChain);
+        }
+        // Stable secondary sort: priced tokens first, then by symbol.
+        if ((a.price > 0) !== (b.price > 0)) return a.price > 0 ? -1 : 1;
+        return a.symbol.localeCompare(b.symbol);
       });
   } catch {
     tokens = [];

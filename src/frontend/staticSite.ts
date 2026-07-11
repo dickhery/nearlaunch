@@ -1,5 +1,16 @@
 import { AssetManager } from "@icp-sdk/canisters/assets";
 import type { HttpAgent } from "@icp-sdk/core/agent";
+import {
+  contentTypeForPath,
+  normalizeStaticSitePath,
+  stripCommonRootFolder,
+} from "./staticSitePaths";
+
+export {
+  contentTypeForPath,
+  normalizeStaticSitePath,
+  stripCommonRootFolder,
+} from "./staticSitePaths";
 
 export const STATIC_SITE_TEMPLATE_ID = "static-site";
 export const MAX_STATIC_SITE_FILES = 200;
@@ -27,52 +38,36 @@ const SPA_ASSETS_CONFIG = `[
 ]
 `;
 
-const MIME_TYPES: Record<string, string> = {
-  ".html": "text/html",
-  ".htm": "text/html",
-  ".css": "text/css",
-  ".js": "text/javascript",
-  ".mjs": "text/javascript",
-  ".json": "application/json",
-  ".json5": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".txt": "text/plain",
-  ".xml": "application/xml",
-  ".wasm": "application/wasm",
-  ".map": "application/json",
+export type StaticSiteFilePlan = {
+  source: File;
+  relativePath: string;
+  assetPath: string;
 };
 
 export function isStaticSiteTemplate(templateId: string): boolean {
   return templateId === STATIC_SITE_TEMPLATE_ID;
 }
 
-export function contentTypeForPath(assetPath: string): string {
-  const extension = assetPath.slice(assetPath.lastIndexOf(".")).toLowerCase();
-  return MIME_TYPES[extension] || "application/octet-stream";
+export function relativePathFromFile(file: File): string {
+  return (file.webkitRelativePath || file.name)
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "");
 }
 
-export function normalizeStaticSitePath(relativePath: string): string {
-  const normalized = relativePath.replaceAll("\\", "/").replace(/^\/+/, "");
-  if (!normalized || normalized.includes("..")) {
-    throw new Error(`Invalid file path: ${relativePath}`);
-  }
-  return `/${normalized}`;
+export function planStaticSiteFiles(files: File[]): StaticSiteFilePlan[] {
+  const stripped = stripCommonRootFolder(files.map(relativePathFromFile));
+  return files.map((source, index) => {
+    const relativePath = stripped[index] ?? relativePathFromFile(source);
+    return {
+      source,
+      relativePath,
+      assetPath: normalizeStaticSitePath(relativePath),
+    };
+  });
 }
 
 export function staticSitePaths(files: File[]): string[] {
-  return files.map((file) => {
-    const relativePath = file.webkitRelativePath || file.name;
-    return normalizeStaticSitePath(relativePath);
-  });
+  return planStaticSiteFiles(files).map((plan) => plan.assetPath);
 }
 
 export function validateStaticSiteFiles(files: File[]): string | null {
@@ -85,26 +80,27 @@ export function validateStaticSiteFiles(files: File[]): string | null {
 
   let totalBytes = 0;
   const paths = new Set<string>();
-  let hasIndex = false;
+  let plan: StaticSiteFilePlan[];
 
-  for (const file of files) {
-    totalBytes += file.size;
+  try {
+    plan = planStaticSiteFiles(files);
+  } catch (error) {
+    return error instanceof Error ? error.message : "Invalid static site package.";
+  }
+
+  for (const entry of plan) {
+    totalBytes += entry.source.size;
     if (totalBytes > MAX_STATIC_SITE_BYTES) {
       return "Total upload size cannot exceed 50 MB.";
     }
-
-    const assetPath = normalizeStaticSitePath(file.webkitRelativePath || file.name);
-    if (paths.has(assetPath)) {
-      return `Duplicate file path: ${assetPath}`;
+    if (paths.has(entry.assetPath)) {
+      return `Duplicate file path: ${entry.assetPath}`;
     }
-    paths.add(assetPath);
-    if (assetPath === "/index.html" || assetPath.endsWith("/index.html")) {
-      hasIndex = true;
-    }
+    paths.add(entry.assetPath);
   }
 
-  if (!hasIndex) {
-    return "Your project must include an index.html file.";
+  if (!paths.has("/index.html")) {
+    return "Your project must include an index.html file at the site root (after the selected folder is normalized).";
   }
   return null;
 }
@@ -126,31 +122,42 @@ export async function uploadStaticSiteFiles(
     throw new Error(validationError);
   }
 
+  const plan = planStaticSiteFiles(files);
   const assetManager = new AssetManager({ canisterId, agent });
-  const uploadFiles = [...files];
-  const hasAssetsConfig = uploadFiles.some((file) => {
-    const assetPath = normalizeStaticSitePath(file.webkitRelativePath || file.name);
-    return assetPath === "/.ic-assets.json5";
-  });
+  const hasAssetsConfig = plan.some((entry) => entry.assetPath === "/.ic-assets.json5");
 
-  if (!hasAssetsConfig) {
-    uploadFiles.push(
-      new File([SPA_ASSETS_CONFIG], ".ic-assets.json5", {
-        type: "application/json",
-      }),
-    );
+  const uploads: Array<{ assetPath: string; content: Uint8Array; contentType: string }> =
+    [];
+
+  for (const entry of plan) {
+    uploads.push({
+      assetPath: entry.assetPath,
+      content: new Uint8Array(await entry.source.arrayBuffer()),
+      contentType: contentTypeForPath(entry.assetPath),
+    });
   }
 
-  const total = uploadFiles.length;
+  if (!hasAssetsConfig) {
+    const encoder = new TextEncoder();
+    uploads.push({
+      assetPath: "/.ic-assets.json5",
+      content: encoder.encode(SPA_ASSETS_CONFIG),
+      contentType: "application/json",
+    });
+  }
+
+  const total = uploads.length;
   let uploaded = 0;
 
-  for (const file of uploadFiles) {
-    const assetPath = normalizeStaticSitePath(file.webkitRelativePath || file.name);
-    const content = new Uint8Array(await file.arrayBuffer());
-    await assetManager.store(content, {
-      fileName: assetPath.slice(1),
-      path: "/",
-      contentType: contentTypeForPath(assetPath),
+  for (const item of uploads) {
+    // AssetManager joins path + fileName (e.g. path "/assets" + "app.js" -> "/assets/app.js").
+    const lastSlash = item.assetPath.lastIndexOf("/");
+    const directory = lastSlash <= 0 ? "/" : item.assetPath.slice(0, lastSlash);
+    const fileName = item.assetPath.slice(lastSlash + 1);
+    await assetManager.store(item.content, {
+      fileName,
+      path: directory,
+      contentType: item.contentType,
     });
     uploaded += 1;
     onProgress?.(uploaded, total);
