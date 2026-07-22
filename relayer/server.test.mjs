@@ -208,6 +208,8 @@ test("CORS normalizes configured origins and handles preflight requests", async 
   const baseUrl = `http://127.0.0.1:${port}`;
   const frontendOrigin =
     "https://5cg73-fqaaa-aaaah-qusea-cai.icp0.io";
+  const siblingOrigin =
+    "https://5cg73-fqaaa-aaaah-qusea-cai.icp.net";
   const { server, output } = startRelayer(port, {
     RELAYER_ALLOWED_ORIGIN: `${frontendOrigin}/`,
   });
@@ -221,6 +223,15 @@ test("CORS normalizes configured origins and handles preflight requests", async 
     assert.equal(
       health.headers.get("access-control-allow-origin"),
       frontendOrigin,
+    );
+
+    // Configuring only icp0.io must also allow the icp.net gateway sibling.
+    const siblingHealth = await fetch(`${baseUrl}/health`, {
+      headers: { Origin: siblingOrigin },
+    });
+    assert.equal(
+      siblingHealth.headers.get("access-control-allow-origin"),
+      siblingOrigin,
     );
 
     const preflight = await fetch(`${baseUrl}/api/tokens`, {

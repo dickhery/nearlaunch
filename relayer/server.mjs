@@ -60,22 +60,58 @@ function normalizeAllowedOrigin(value) {
   return parsed.origin;
 }
 
+// ICP frontends are reachable on both icp0.io and icp.net (and optional raw
+// hosts). Operators usually configure only one gateway in
+// RELAYER_ALLOWED_ORIGIN, which silently breaks the other. Expand a configured
+// canister origin to the common gateway siblings so browser CORS works either
+// way without listing every host by hand.
+function expandIcpGatewayOrigins(origin) {
+  if (origin === "*") return [origin];
+
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    return [origin];
+  }
+
+  const match = parsed.hostname.match(
+    /^([a-z0-9-]+)(?:\.(raw))?\.(icp0\.io|icp\.net)$/i,
+  );
+  if (!match) return [origin];
+
+  const canisterId = match[1].toLowerCase();
+  const expanded = new Set([parsed.origin]);
+  for (const gateway of ["icp0.io", "icp.net"]) {
+    expanded.add(`${parsed.protocol}//${canisterId}.${gateway}`);
+    expanded.add(`${parsed.protocol}//${canisterId}.raw.${gateway}`);
+  }
+  return [...expanded];
+}
+
 function parseAllowedOrigins(value) {
-  const origins = value
+  const configured = value
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean)
     .map(normalizeAllowedOrigin);
 
-  if (origins.length === 0) {
+  if (configured.length === 0) {
     throw new Error("RELAYER_ALLOWED_ORIGIN must contain at least one origin.");
   }
-  if (origins.includes("*") && origins.length > 1) {
+  if (configured.includes("*") && configured.length > 1) {
     throw new Error(
       'RELAYER_ALLOWED_ORIGIN cannot combine "*" with explicit origins.',
     );
   }
-  return new Set(origins);
+
+  const origins = new Set();
+  for (const origin of configured) {
+    for (const expanded of expandIcpGatewayOrigins(origin)) {
+      origins.add(expanded);
+    }
+  }
+  return origins;
 }
 
 const METRICS_API_BASE =

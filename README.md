@@ -117,6 +117,11 @@ served from more than one origin. Configure origins only, without paths. A
 trailing slash is normalized, so both `https://example.com` and
 `https://example.com/` match the browser origin `https://example.com`.
 
+ICP asset canisters are reachable on both `*.icp0.io` and `*.icp.net`. When you
+configure either gateway for a canister ID, the relayer also allows the sibling
+hosts (including raw variants) so browser CORS does not break when a user opens
+the deploy URL on a different gateway.
+
 Configure the partner credential issued by the NEAR Intents Partner Dashboard.
 The relayer supports `X-API-Key` through `NEAR_1CLICK_API_KEY` and bearer
 authentication through `NEAR_1CLICK_JWT`. Never place either credential in a

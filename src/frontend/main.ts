@@ -147,6 +147,7 @@ let adminAccess: AdminAccess | null = null;
 let admins: Principal[] = [];
 let factoryReadiness: FactoryReadiness | null = null;
 let relayerHealth: RelayerHealth | null = null;
+let lastRelayerError = "";
 let revenueSummary: RevenueSummary | null = null;
 let notice = "";
 let paymentError = "";
@@ -747,11 +748,28 @@ function factoryCapacityMessage(): string | null {
   return null;
 }
 
+function preferredFrontendOrigin(): string {
+  const host = window.location.hostname.toLowerCase();
+  const match = host.match(
+    /^([a-z0-9-]+)(?:\.raw)?\.(icp0\.io|icp\.net)$/i,
+  );
+  if (!match) return window.location.origin;
+  return `https://${match[1]}.icp0.io`;
+}
+
 function renderAvailability(): string {
   const messages: string[] = [];
   if (!relayerHealth) {
+    const preferred = preferredFrontendOrigin();
+    const onAlternateGateway =
+      preferred !== window.location.origin &&
+      /\.icp\.net$/i.test(window.location.hostname);
     messages.push(
-      "The payment service is unreachable. New payment quotes are unavailable until the relayer connection is restored.",
+      onAlternateGateway
+        ? `The payment service is blocked for this site origin (${window.location.origin}). Open ${preferred} or allow both icp0.io and icp.net origins on the relayer (RELAYER_ALLOWED_ORIGIN).`
+        : lastRelayerError
+          ? `The payment service is unreachable (${lastRelayerError}). New payment quotes are unavailable until the relayer connection is restored.`
+          : "The payment service is unreachable. New payment quotes are unavailable until the relayer connection is restored.",
     );
   } else if (!relayerHealth.backendConnected) {
     messages.push(
@@ -3081,10 +3099,22 @@ async function refreshCurrentCycleBalance(force = false): Promise<void> {
 
 async function loadRelayerHealth(): Promise<void> {
   try {
-    const response = await fetch(`${RELAYER_URL}/health`);
-    if (response.ok) relayerHealth = (await response.json()) as RelayerHealth;
-  } catch {
+    const response = await fetch(`${RELAYER_URL}/health`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (response.ok) {
+      relayerHealth = (await response.json()) as RelayerHealth;
+      lastRelayerError = "";
+      return;
+    }
     relayerHealth = null;
+    lastRelayerError = `HTTP ${response.status} from ${RELAYER_URL}/health`;
+  } catch (error) {
+    relayerHealth = null;
+    const detail = error instanceof Error ? error.message : String(error);
+    lastRelayerError = `failed to reach ${RELAYER_URL} from ${window.location.origin}${detail ? `: ${detail}` : ""}`;
   }
 }
 
