@@ -105,6 +105,21 @@ const RELAYER_URL =
 const canisterEnv = safeGetCanisterEnv();
 const backendCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_backend"];
 const factoryCanisterId = canisterEnv?.["PUBLIC_CANISTER_ID:launcher_factory"];
+
+// Prefer the icp0.io gateway. Production RELAYER_ALLOWED_ORIGIN historically
+// listed only that host; visiting *.icp.net then fails browser CORS and the UI
+// reports the payment service as unreachable. After the relayer expands
+// sibling gateways, either host works — but keep traffic on icp0.io so older
+// relayer processes and bookmarked icp.net links still function.
+(() => {
+  if (isLocalFrontend) return;
+  const host = window.location.hostname.toLowerCase();
+  const match = host.match(/^([a-z0-9-]+)(?:\.raw)?\.icp\.net$/i);
+  if (!match) return;
+  const target = new URL(window.location.href);
+  target.hostname = `${match[1]}.icp0.io`;
+  window.location.replace(target.toString());
+})();
 const TRILLION_CYCLES = 1_000_000_000_000n;
 const INITIAL_DEPLOY_CYCLES = 2n * TRILLION_CYCLES;
 const MIN_TOP_UP_CYCLES = 100_000_000_000n;
