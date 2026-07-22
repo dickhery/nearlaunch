@@ -1350,7 +1350,7 @@ textarea {
 
 .admin-status-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 1px;
   margin-bottom: 24px;
   border: 1px solid var(--line);
@@ -1402,6 +1402,136 @@ textarea {
 .principal-code {
   color: var(--green);
   font-family: var(--mono);
+}
+
+.revenue-guide-card {
+  margin-top: 24px;
+}
+
+.revenue-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 18px 0 22px;
+  border: 1px solid var(--line);
+  background: var(--line);
+}
+
+.revenue-summary-grid article {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+  background: #0c1012;
+  padding: 18px;
+}
+
+.revenue-summary-grid small,
+.revenue-summary-grid span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.revenue-summary-grid strong {
+  font-size: 1.15rem;
+}
+
+.treasury-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+}
+
+.treasury-row > div {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.treasury-row small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.revenue-steps {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: revenue-step;
+}
+
+.revenue-steps li {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding: 16px 18px 16px 54px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.revenue-steps li::before {
+  counter-increment: revenue-step;
+  content: counter(revenue-step, decimal-leading-zero);
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.revenue-steps strong {
+  color: #e8efec;
+  font-size: 0.9rem;
+}
+
+.revenue-steps span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+.revenue-steps code {
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+}
+
+.ops-commands {
+  margin-top: 22px;
+  padding-top: 8px;
+}
+
+.ops-command-block {
+  margin: 12px 0;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #080b0c;
+  padding: 16px 18px;
+  color: #b7c7c1;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.ops-command-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.treasury-form {
+  margin-top: 22px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
 .admin-grid {
@@ -1650,8 +1780,13 @@ button[data-busy-disabled="true"] {
     grid-template-columns: repeat(2, 1fr);
   }
 
-  .admin-status-grid {
+  .admin-status-grid,
+  .revenue-summary-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .treasury-row {
+    flex-direction: column;
   }
 
   .template-admin-list form {
@@ -1733,9 +1868,14 @@ button[data-busy-disabled="true"] {
   .order-facts,
   .admin-grid,
   .admin-status-grid,
+  .revenue-summary-grid,
   .cycle-plan-summary,
   .principal-panel {
     grid-template-columns: 1fr;
+  }
+
+  .ops-command-actions {
+    flex-direction: column;
   }
 
   .order-facts div {

@@ -118,8 +118,23 @@ shared (install) actor class LauncherBackend() {
 
   var templates = defaultTemplateRegistry();
 
+  // Running revenue counters. Updated only when a payment settles so admin
+  // reads remain pure queries without iterating the full order map.
+  var settledPayments : Nat = 0;
+  var settledDeployPayments : Nat = 0;
+  var settledTopUpPayments : Nat = 0;
+  var settledUsdCents : Nat = 0;
+  var settledSettlementAmount : Nat = 0;
+  var refundRequiredCount : Nat = 0;
+  var revenueCountersReady : Bool = false;
+  // NEAR treasury account (or destination address) where 1Click delivers funds.
+  // Displayed to admins so they can collect revenue without digging through
+  // relayer env. Keep this in sync with SETTLEMENT_RECIPIENT on the relayer.
+  var treasuryRecipient : Text = "";
+
   system func postupgrade() {
     ensureTemplateCatalog();
+    ensureRevenueCounters();
   };
 
   let orders = Map.empty<Nat, Types.DeploymentOrder>();
@@ -228,6 +243,44 @@ shared (install) actor class LauncherBackend() {
 
   func isDeployOrder(order : Types.DeploymentOrder) : Bool {
     not isTopUpOrder(order);
+  };
+
+  func orderWasSettled(order : Types.DeploymentOrder) : Bool {
+    order.settlementProof != null;
+  };
+
+  func recordSettledPayment(order : Types.DeploymentOrder) {
+    settledPayments += 1;
+    settledUsdCents += order.expectedAmountUsdCents;
+    settledSettlementAmount += order.expectedSettlementAmount;
+    if (isTopUpOrder(order)) {
+      settledTopUpPayments += 1;
+    } else {
+      settledDeployPayments += 1;
+    };
+  };
+
+  // One-shot backfill for upgrades from builds that did not track revenue.
+  // Safe to call repeatedly; no-ops after the first successful pass.
+  func ensureRevenueCounters() {
+    if (revenueCountersReady) return;
+
+    settledPayments := 0;
+    settledDeployPayments := 0;
+    settledTopUpPayments := 0;
+    settledUsdCents := 0;
+    settledSettlementAmount := 0;
+    refundRequiredCount := 0;
+
+    for (order in orders.values()) {
+      if (orderWasSettled(order)) {
+        recordSettledPayment(order);
+      };
+      if (order.status == #RefundRequired) {
+        refundRequiredCount += 1;
+      };
+    };
+    revenueCountersReady := true;
   };
 
   func randomToken(random : Blob) : Text {
@@ -776,6 +829,7 @@ shared (install) actor class LauncherBackend() {
       return #err("Settlement proof is malformed.");
     };
 
+    ensureRevenueCounters();
     usedSettlementProofs.add(proof.proofId);
     let updated = {
       order with
@@ -785,6 +839,8 @@ shared (install) actor class LauncherBackend() {
       error = null;
     };
     orders.add(orderId, updated);
+    // Count revenue once, when the settlement proof is first accepted.
+    recordSettledPayment(updated);
     #ok(updated);
   };
 
@@ -799,12 +855,14 @@ shared (install) actor class LauncherBackend() {
     };
     if (order.status != #AwaitingPayment) return #err("Order cannot be marked for refund.");
 
+    ensureRevenueCounters();
     let updated = {
       order with
       status = #RefundRequired;
       error = ?reason;
     };
     orders.add(orderId, updated);
+    refundRequiredCount += 1;
     #ok(updated);
   };
 
@@ -1043,6 +1101,39 @@ shared (install) actor class LauncherBackend() {
       liveApps = liveAppCount;
       templates = templates.size();
     };
+  };
+
+  // Admin-only. Pure query over precomputed counters — no order scan, no cycles
+  // spent on inter-canister work. Counters are backfilled once in postupgrade
+  // and incremented on each successful settlement.
+  public shared query ({ caller }) func getRevenueSummary() : async Types.RevenueSummary {
+    requireAdmin(caller);
+    {
+      settledPayments;
+      settledDeployPayments;
+      settledTopUpPayments;
+      settledUsdCents;
+      settledSettlementAmount;
+      settlementAssetId = settlementConfig.assetId;
+      settlementDecimals = settlementConfig.decimals;
+      settlementSymbol = paymentDisplayConfig.settlementSymbol;
+      settlementNetwork = paymentDisplayConfig.settlementNetwork;
+      treasuryRecipient;
+      refundRequiredCount;
+      factoryCanisterId;
+    };
+  };
+
+  public shared ({ caller }) func setTreasuryRecipient(
+    recipient : Text
+  ) : async Result.Result<(), Text> {
+    requireAdmin(caller);
+    // Frontend trims whitespace; reject only oversized values here.
+    if (recipient.size() > 120) {
+      return #err("Treasury recipient is too long.");
+    };
+    treasuryRecipient := recipient;
+    #ok(());
   };
 
   public shared ({ caller }) func setSettlementRelayer(

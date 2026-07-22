@@ -779,6 +779,12 @@ app.get("/health", (_request, response) => {
       backendRuntime.ready &&
       (config.mock || (recipientConfigured && partnerAuthConfigured)),
     destinationAsset: config.destinationAsset,
+    // Treasury destination for 1Click EXACT_OUTPUT settlements. Exposed so the
+    // admin UI can show where platform revenue lands without re-opening .env.
+    settlementRecipient: config.recipient || undefined,
+    settlementRecipientType: config.recipient
+      ? config.recipientType
+      : undefined,
     icpEnvironment: config.icpEnvironment,
     recipientConfigured,
     partnerAuthConfigured,

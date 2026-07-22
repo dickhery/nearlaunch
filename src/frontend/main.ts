@@ -13,6 +13,7 @@ import {
   type ResultOrder,
   type ResultText,
   type ResultUnit,
+  type RevenueSummary,
   type Template,
 } from "./bindings/launcher_backend";
 import {
@@ -69,6 +70,8 @@ type RelayerHealth = {
   mode: "mock" | "live";
   ready?: boolean;
   destinationAsset: string;
+  settlementRecipient?: string;
+  settlementRecipientType?: string;
   icpEnvironment: string;
   recipientConfigured?: boolean;
   partnerAuthConfigured?: boolean;
@@ -144,6 +147,7 @@ let adminAccess: AdminAccess | null = null;
 let admins: Principal[] = [];
 let factoryReadiness: FactoryReadiness | null = null;
 let relayerHealth: RelayerHealth | null = null;
+let revenueSummary: RevenueSummary | null = null;
 let notice = "";
 let paymentError = "";
 let busy = false;
@@ -1561,6 +1565,153 @@ function renderLiveStaticSiteEditor(): string {
   `;
 }
 
+function treasuryRecipientDisplay(): string {
+  const onChain = revenueSummary?.treasuryRecipient?.trim() || "";
+  if (onChain) return onChain;
+  return relayerHealth?.settlementRecipient?.trim() || "";
+}
+
+function treasuryMismatch(): boolean {
+  const onChain = revenueSummary?.treasuryRecipient?.trim() || "";
+  const relayer = relayerHealth?.settlementRecipient?.trim() || "";
+  return Boolean(onChain && relayer && onChain !== relayer);
+}
+
+function settledAssetLabel(): string {
+  if (!revenueSummary || !publicConfig) return "—";
+  return `${units(
+    revenueSummary.settledSettlementAmount,
+    Number(revenueSummary.settlementDecimals),
+  )} ${revenueSummary.settlementSymbol}`;
+}
+
+function renderRevenueGuide(): string {
+  const treasury = treasuryRecipientDisplay();
+  const symbol = publicConfig?.paymentDisplay.settlementSymbol || "USDC";
+  const network = publicConfig?.paymentDisplay.settlementNetwork || "NEAR";
+  const factoryId = factoryCanisterId || revenueSummary?.factoryCanisterId || "launcher_factory";
+  const shortfall = factoryDeployShortfall();
+  const topUpAmount =
+    shortfall && shortfall > 0n
+      ? shortfall.toString()
+      : "1000000000000";
+
+  return `
+    <div class="admin-card revenue-guide-card">
+      <div class="admin-card-heading">
+        <span class="section-label">Revenue collection</span>
+        <strong>${html(symbol)} on ${html(network)}</strong>
+      </div>
+      <p class="muted">Customer payments never land in an ICP wallet. NEAR Intents 1Click delivers the fixed settlement amount to your treasury destination. Use this guide to collect revenue and keep the factory funded without burning extra cycles.</p>
+
+      <div class="revenue-summary-grid">
+        <article>
+          <small>Settled revenue</small>
+          <strong>${revenueSummary ? money(revenueSummary.settledUsdCents) : "—"}</strong>
+          <span>${revenueSummary ? settledAssetLabel() : "Sign in as admin to load"}</span>
+        </article>
+        <article>
+          <small>Settled payments</small>
+          <strong>${revenueSummary ? revenueSummary.settledPayments.toString() : "—"}</strong>
+          <span>${
+            revenueSummary
+              ? `${revenueSummary.settledDeployPayments.toString()} deploys · ${revenueSummary.settledTopUpPayments.toString()} top-ups`
+              : "Query is free and admin-only"
+          }</span>
+        </article>
+        <article>
+          <small>Factory cycles</small>
+          <strong>${factoryReadiness ? cycles(factoryReadiness.cycleBalance) : "—"}</strong>
+          <span>${
+            factoryReadiness?.canDeploy
+              ? "Ready for new deployments"
+              : shortfall && shortfall > 0n
+                ? `Needs at least ${cycles(shortfall)} more`
+                : "Check readiness"
+          }</span>
+        </article>
+        <article>
+          <small>Refund watchlist</small>
+          <strong>${revenueSummary ? revenueSummary.refundRequiredCount.toString() : "—"}</strong>
+          <span>Manual NEAR refunds if marked by the relayer</span>
+        </article>
+      </div>
+
+      <div class="treasury-row">
+        <div>
+          <small>Treasury destination</small>
+          <code class="principal-code">${html(treasury || "Not configured")}</code>
+          ${
+            treasury
+              ? `<button class="text-button" data-copy-text="${html(treasury)}" type="button">Copy treasury address</button>`
+              : `<span class="muted">Set it below (and in the relayer <code>SETTLEMENT_RECIPIENT</code> env).</span>`
+          }
+        </div>
+        <button class="button secondary" id="refresh-revenue-button" type="button">Refresh revenue</button>
+      </div>
+
+      ${
+        !treasury
+          ? `<div class="admin-alert"><strong>Treasury missing</strong><span>Save the NEAR account or address where 1Click delivers settlement funds. The live relayer must use the same value in <code>SETTLEMENT_RECIPIENT</code>.</span></div>`
+          : ""
+      }
+      ${
+        treasuryMismatch()
+          ? `<div class="admin-alert"><strong>Treasury mismatch</strong><span>On-chain treasury is <code>${html(revenueSummary?.treasuryRecipient || "")}</code> but the relayer is delivering to <code>${html(relayerHealth?.settlementRecipient || "")}</code>. Align them before accepting payments.</span></div>`
+          : ""
+      }
+
+      <ol class="revenue-steps">
+        <li>
+          <strong>Confirm settlement destination</strong>
+          <span>Every paid order swaps into <code>${html(publicConfig?.settlement.assetId || "settlement asset")}</code> and credits your treasury on ${html(network)}. The deposit address users fund is temporary; final revenue is yours after the swap succeeds.</span>
+        </li>
+        <li>
+          <strong>Collect or transfer revenue</strong>
+          <span>Open the wallet that controls <code>${html(treasury || "your treasury account")}</code>, check the ${html(symbol)} balance, and transfer funds to your cold wallet, exchange, or operating account. NearLaunch does not custody or auto-withdraw this balance.</span>
+        </li>
+        <li>
+          <strong>Fund factory cycles from operating revenue</strong>
+          <span>Deployments spend factory cycles, not settlement ${html(symbol)}. Convert a portion of revenue to ICP, mint cycles for the deployer identity, then top up the factory. Prefer infrequent larger top-ups over many small ones to keep management calls low.</span>
+        </li>
+        <li>
+          <strong>Keep a readiness reserve</strong>
+          <span>Leave enough factory balance for the largest child allocation plus the on-chain safety reserve. Pause new orders from this dashboard if the factory shortfall grows, then top up before re-enabling.</span>
+        </li>
+      </ol>
+
+      <div class="ops-commands">
+        <div class="admin-card-heading">
+          <span class="section-label">Operator commands</span>
+          <strong>icp-cli</strong>
+        </div>
+        <p class="muted">Run these with the deployment identity after converting ICP to cycles. Replace amounts as needed.</p>
+        <pre class="ops-command-block"><code># Check factory readiness
+icp canister call launcher_factory getCycleBalance '()' -e ic --query
+
+# Top up factory (example: ${html(cycles(BigInt(topUpAmount)))} cycles)
+icp canister top-up ${html(factoryId)} --amount ${html(topUpAmount)} -e ic --identity nearlaunch-deployer
+
+# Optional: convert ICP to cycles first
+icp cycles mint --cycles ${html(topUpAmount)} -e ic --identity nearlaunch-deployer</code></pre>
+        <div class="ops-command-actions">
+          <button class="button secondary" data-copy-text="icp canister call launcher_factory getCycleBalance '()' -e ic --query" type="button">Copy balance check</button>
+          <button class="button secondary" data-copy-text="icp canister top-up ${html(factoryId)} --amount ${html(topUpAmount)} -e ic --identity nearlaunch-deployer" type="button">Copy top-up command</button>
+        </div>
+      </div>
+
+      <form class="treasury-form" id="treasury-form">
+        <div class="admin-card-heading"><span class="section-label">Treasury label</span><strong>On-chain</strong></div>
+        <label>Treasury recipient (NEAR account or destination address)
+          <input name="recipient" value="${html(revenueSummary?.treasuryRecipient || relayerHealth?.settlementRecipient || "")}" placeholder="your-treasury.near" autocomplete="off" />
+        </label>
+        <p class="field-help">Stored for admin display only. The relayer still needs the same value in <code>SETTLEMENT_RECIPIENT</code> to deliver real funds.</p>
+        <button class="button primary wide" type="submit">Save treasury recipient</button>
+      </form>
+    </div>
+  `;
+}
+
 function renderAdmin(): string {
   if (!adminAccess?.isAdmin || !publicConfig) return "";
   const pricing = publicConfig.pricing;
@@ -1570,7 +1721,7 @@ function renderAdmin(): string {
       <div class="section-intro compact">
         <span class="section-number">03</span>
         <div><span class="kicker">Platform controls</span><h2>Admin dashboard.</h2></div>
-        <p>Pricing and payment configuration are stored on-chain and applied to new orders only.</p>
+        <p>Pricing and payment configuration are stored on-chain and applied to new orders only. Revenue settles off-ICP to your NEAR treasury.</p>
       </div>
 
       <div class="admin-status-grid">
@@ -1578,6 +1729,7 @@ function renderAdmin(): string {
         <article><small>Factory</small><strong>${html(readinessStatus())}</strong><span>${factoryReadiness ? `${cycles(factoryReadiness.cycleBalance)} available` : "Unavailable"}</span></article>
         <article><small>App Wasm</small><strong>${factoryReadiness?.templateWasmConfigured ? "Configured" : "Missing"}</strong><span>${factoryReadiness ? `${factoryReadiness.templateWasmSize.toString()} bytes` : "Unavailable"}</span></article>
         <article><small>Asset Wasm</small><strong>${factoryReadiness?.assetWasmConfigured ? "Configured" : "Missing"}</strong><span>${factoryReadiness ? `${factoryReadiness.assetWasmSize.toString()} bytes` : "Unavailable"}</span></article>
+        <article><small>Settled revenue</small><strong>${revenueSummary ? money(revenueSummary.settledUsdCents) : "—"}</strong><span>${revenueSummary ? `${revenueSummary.settledPayments.toString()} payments` : "Load after admin sign-in"}</span></article>
         <article><small>New orders</small><strong>${publicConfig.ordersEnabled ? "Enabled" : "Paused"}</strong><button class="text-button" id="toggle-orders-button" type="button">${publicConfig.ordersEnabled ? "Pause" : "Enable"}</button></article>
       </div>
 
@@ -1597,6 +1749,8 @@ function renderAdmin(): string {
           : ""
       }
 
+      ${renderRevenueGuide()}
+
       <div class="admin-grid">
         <form class="admin-card" id="pricing-form">
           <div class="admin-card-heading"><span class="section-label">Pricing</span><strong>${html(publicConfig.paymentDisplay.priceCurrency)}</strong></div>
@@ -1604,7 +1758,7 @@ function renderAdmin(): string {
           <label>Starter deploy allocation (T)<input name="initialDeployCycles" value="${units(pricing.initialDeployCycles ?? INITIAL_DEPLOY_CYCLES, 12, 3)}" inputmode="decimal" /></label>
           <label>Cycle markup (%)<input name="cyclesMarkupPercent" value="${(Number(pricing.cyclesMarkupBps ?? 5_000n) / 100).toFixed(0)}" inputmode="numeric" /></label>
           <label>USD per trillion cycles<input name="usdPerTrillion" value="${units(pricing.usdPerTrillionCents ?? 100n, 2, 2)}" inputmode="decimal" /></label>
-          <p class="muted">Market rate is refreshed by the relayer. Deploy orders include template + service + marked-up starter cycles. Top-ups charge only marked-up cycles.</p>
+          <p class="muted">Market rate is refreshed by the relayer. Deploy orders include template + service + marked-up starter cycles. Top-ups charge only marked-up cycles. Keep allocations conservative so factory top-ups stay infrequent.</p>
           <button class="button secondary wide" id="refresh-rate-button" type="button">Refresh market cycle rate</button>
           <button class="button secondary wide" id="cycle-preset-button" type="button">Apply conservative cycle preset</button>
           <button class="button primary wide" type="submit">Save pricing</button>
@@ -1874,6 +2028,12 @@ function bindEvents(): void {
       void copyPrincipal();
     });
   });
+  document.querySelectorAll<HTMLElement>("[data-copy-text]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const value = button.dataset.copyText;
+      if (value) void copyTextValue(value, "Copied to clipboard.");
+    });
+  });
   document.querySelector<HTMLInputElement>("#principal-value")?.addEventListener("click", (event) => {
     if (event.currentTarget instanceof HTMLInputElement) {
       event.currentTarget.select();
@@ -2080,6 +2240,15 @@ function bindEvents(): void {
   });
   document.querySelector("#toggle-orders-button")?.addEventListener("click", () => {
     void toggleOrders();
+  });
+  document.querySelector("#refresh-revenue-button")?.addEventListener("click", () => {
+    void refreshRevenueSummary();
+  });
+  document.querySelector<HTMLFormElement>("#treasury-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (event.currentTarget instanceof HTMLFormElement) {
+      void saveTreasuryRecipient(event.currentTarget);
+    }
   });
   document.querySelector<HTMLFormElement>("#admin-add-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -2315,6 +2484,40 @@ async function withBusy(
     busyMessage = "";
     render();
   }
+}
+
+async function copyTextValue(value: string, successNotice: string): Promise<void> {
+  if (!value) return;
+  let copied = false;
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+
+  if (!copied) {
+    const field = document.createElement("textarea");
+    field.value = value;
+    field.setAttribute("readonly", "");
+    field.style.position = "fixed";
+    field.style.opacity = "0";
+    document.body.append(field);
+    field.focus();
+    field.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+    field.remove();
+  }
+
+  notice = copied ? successNotice : "Copy failed. Select the text manually.";
+  render();
 }
 
 async function copyPrincipal(): Promise<void> {
@@ -2793,6 +2996,46 @@ async function loadAdminAccess(): Promise<void> {
   } else {
     admins = [];
   }
+  if (adminAccess.isAdmin) {
+    await loadRevenueSummary();
+  } else {
+    revenueSummary = null;
+  }
+}
+
+async function loadRevenueSummary(): Promise<void> {
+  if (!actor || !adminAccess?.isAdmin) {
+    revenueSummary = null;
+    return;
+  }
+  try {
+    revenueSummary = await actor.getRevenueSummary();
+  } catch {
+    // Older backends or non-admin callers should not break the dashboard.
+    revenueSummary = null;
+  }
+}
+
+async function refreshRevenueSummary(): Promise<void> {
+  await withBusy(async () => {
+    await Promise.all([loadRevenueSummary(), loadFactoryReadiness(), loadRelayerHealth()]);
+    notice = revenueSummary
+      ? `Revenue ledger: ${money(revenueSummary.settledUsdCents)} across ${revenueSummary.settledPayments.toString()} payments.`
+      : "Revenue summary is unavailable.";
+  }, "Refreshing revenue summary...");
+}
+
+async function saveTreasuryRecipient(form: HTMLFormElement): Promise<void> {
+  await withBusy(async () => {
+    if (!actor) throw new Error("Admin actor is unavailable.");
+    const data = new FormData(form);
+    const recipient = String(data.get("recipient") || "").trim();
+    unwrapUnit(await actor.setTreasuryRecipient(recipient));
+    await loadRevenueSummary();
+    notice = recipient
+      ? "Treasury recipient saved for the admin guide. Keep the relayer SETTLEMENT_RECIPIENT in sync."
+      : "Treasury recipient cleared.";
+  }, "Saving treasury recipient...");
 }
 
 async function loadFactoryReadiness(): Promise<void> {

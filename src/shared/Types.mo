@@ -232,4 +232,21 @@ module {
     liveApps : Nat;
     templates : Nat;
   };
+
+  // Admin-only revenue ledger snapshot. Counters are updated at settlement
+  // time so reads stay cheap query calls with no order scanning.
+  public type RevenueSummary = {
+    settledPayments : Nat;
+    settledDeployPayments : Nat;
+    settledTopUpPayments : Nat;
+    settledUsdCents : Nat;
+    settledSettlementAmount : Nat;
+    settlementAssetId : Text;
+    settlementDecimals : Nat;
+    settlementSymbol : Text;
+    settlementNetwork : Text;
+    treasuryRecipient : Text;
+    refundRequiredCount : Nat;
+    factoryCanisterId : Text;
+  };
 };
