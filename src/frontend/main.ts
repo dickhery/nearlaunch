@@ -168,6 +168,11 @@ let notice = "";
 let paymentError = "";
 let busy = false;
 let busyMessage = "";
+/** Client-side page: only one primary workspace is shown at a time. */
+type AppView = "home" | "launch" | "apps" | "how" | "admin";
+let currentView: AppView = parseViewFromHash();
+/** Keep optional portfolio fields collapsed until the user opens them. */
+let showAdvancedConfig = false;
 let draftConfig: AppPreviewConfig = {
   name: "Open Horizon Studio",
   headline: "Designing useful systems for ambitious teams.",
@@ -196,6 +201,36 @@ let draftConfig: AppPreviewConfig = {
     },
   ],
 };
+
+function parseViewFromHash(): AppView {
+  const raw = (location.hash || "#home").replace(/^#/, "").split(/[/?]/)[0] || "home";
+  if (raw === "launch" || raw === "apps" || raw === "how" || raw === "admin" || raw === "home") {
+    return raw;
+  }
+  // Legacy in-page anchors from older builds still land on the right screen.
+  if (raw === "" || raw === "top") return "home";
+  return "home";
+}
+
+function setView(view: AppView, options: { replace?: boolean } = {}): void {
+  const nextHash = view === "home" ? "#home" : `#${view}`;
+  if (options.replace) {
+    history.replaceState(null, "", nextHash);
+  } else if (location.hash !== nextHash) {
+    location.hash = nextHash;
+  }
+  currentView = view;
+}
+
+function syncViewFromHash(): void {
+  const next = parseViewFromHash();
+  if (next === "admin" && !adminAccess?.isAdmin) {
+    currentView = "home";
+    history.replaceState(null, "", "#home");
+    return;
+  }
+  currentView = next;
+}
 
 function createLauncherActor(
   identity?: Awaited<ReturnType<typeof authClient.getIdentity>>,
@@ -1745,16 +1780,373 @@ icp cycles mint --cycles ${html(topUpAmount)} -e ic --identity nearlaunch-deploy
   `;
 }
 
+function navLink(view: AppView, label: string): string {
+  const active = currentView === view ? " is-active" : "";
+  return `<a class="nav-link${active}" href="#${view}" data-nav="${view}">${label}</a>`;
+}
+
+function renderNav(): string {
+  return `
+    <nav class="primary-nav" aria-label="Primary">
+      ${navLink("home", "Home")}
+      ${navLink("launch", "Launch")}
+      ${navLink("apps", "My apps")}
+      ${adminAccess?.isAdmin ? navLink("admin", "Admin") : ""}
+      ${navLink("how", "Guide")}
+    </nav>
+  `;
+}
+
+function renderLaunchSteps(): string {
+  const managingOrder = currentOrder !== null;
+  const status = currentOrder?.status;
+  const paymentDone =
+    status === "PaymentDetected" ||
+    status === "CreatingCanister" ||
+    status === "Live";
+  const live = status === "Live";
+  const steps = [
+    { id: "sign-in", label: "Sign in", done: signedIn, current: !signedIn },
+    {
+      id: "template",
+      label: "Choose template",
+      done: signedIn && (managingOrder || Boolean(selectedTemplate)),
+      current: signedIn && !managingOrder,
+    },
+    {
+      id: "pay",
+      label: "Pay",
+      done: Boolean(paymentDone || live),
+      current: managingOrder && !paymentDone && !live && status !== "Failed",
+    },
+    {
+      id: "deploy",
+      label: "Deploy",
+      done: Boolean(live),
+      current:
+        managingOrder &&
+        (status === "PaymentDetected" ||
+          status === "CreatingCanister" ||
+          status === "Failed"),
+    },
+  ];
+  return `
+    <ol class="launch-steps" aria-label="Deployment steps">
+      ${steps
+        .map(
+          (step, index) => `
+            <li class="launch-step ${step.done ? "is-done" : ""} ${step.current ? "is-current" : ""}">
+              <span class="launch-step-index">${step.done ? "✓" : String(index + 1)}</span>
+              <span class="launch-step-label">${step.label}</span>
+            </li>
+          `,
+        )
+        .join("")}
+    </ol>
+  `;
+}
+
+function renderGettingStarted(): string {
+  const items = [
+    {
+      done: signedIn,
+      title: "Sign in with Internet Identity",
+      body: "Your principal becomes the controller of every app you deploy.",
+      action: signedIn
+        ? `<span class="guide-done">Signed in</span>`
+        : `<button class="button secondary compact" id="guide-sign-in" type="button">Sign in</button>`,
+    },
+    {
+      done: orders.some((order) => !isTopUpOrder(order)),
+      title: "Create a deployment order",
+      body: "Pick a template or upload a static site, configure it, then create an order.",
+      action: `<a class="button secondary compact" href="#launch" data-nav="launch">Open Launch</a>`,
+    },
+    {
+      done: orders.some((order) => order.status === "Live" && !isTopUpOrder(order)),
+      title: "Pay and deploy",
+      body: "Get a NEAR Intents quote, send the exact amount, then deploy your ICP canister.",
+      action: `<a class="button secondary compact" href="#how" data-nav="how">Read the guide</a>`,
+    },
+  ];
+  return `
+    <div class="getting-started">
+      <div class="getting-started-heading">
+        <span class="section-label">Getting started</span>
+        <p>Three steps to a live canister. Only the Launch page makes paid calls after you act.</p>
+      </div>
+      <ol class="getting-started-list">
+        ${items
+          .map(
+            (item, index) => `
+              <li class="getting-started-item ${item.done ? "is-done" : ""}">
+                <span class="getting-started-index">${item.done ? "✓" : String(index + 1)}</span>
+                <div>
+                  <strong>${item.title}</strong>
+                  <p>${item.body}</p>
+                  ${item.action}
+                </div>
+              </li>
+            `,
+          )
+          .join("")}
+      </ol>
+    </div>
+  `;
+}
+
+function renderHomeView(): string {
+  return `
+    <section class="home-view view-panel" id="home">
+      <div class="hero hero-compact">
+        <div class="hero-copy">
+          <div class="eyebrow"><span>NEAR Intents</span><i></i><span>Internet Computer</span></div>
+          <h1>Deploy a live ICP app.<br /><em>Pay from any chain.</em></h1>
+          <p>NearLaunch turns a template (or your own static site) into a funded ICP canister you control. Payments route through NEAR Intents; cycles stay on ICP.</p>
+          <div class="hero-actions">
+            <a class="button primary" href="#launch" data-nav="launch">Start a deployment</a>
+            <a class="button secondary" href="#how" data-nav="how">How it works</a>
+          </div>
+        </div>
+        <div class="hero-side">
+          <div class="hero-console" aria-label="Deployment flow preview">
+            <div class="console-top"><span></span><span></span><span></span><small>intent.deploy</small></div>
+            <div class="console-body compact">
+              <div><small>OUTCOME</small><strong>Live ICP canister</strong></div>
+              <div class="console-route"><span>Any token</span><b>-&gt;</b><span>NEAR Intents</span><b>-&gt;</b><span>${html(publicConfig?.paymentDisplay.settlementSymbol || "USDC")}</span></div>
+              <pre><code><span>starter</span> ${html(cycles(configuredInitialDeployCycles()))}
+<span>controller</span> your principal
+<span>status</span> <b>ready to deploy</b></code></pre>
+            </div>
+          </div>
+          <div class="hero-stats hero-stats-inline">
+            <div><strong>${stats.liveApps.toString()}</strong><small>apps launched</small></div>
+            <div><strong>${stats.templates.toString()}</strong><small>templates</small></div>
+            <div><strong>${stats.totalOrders.toString()}</strong><small>orders</small></div>
+          </div>
+        </div>
+      </div>
+      ${renderGettingStarted()}
+      <div class="home-feature-grid">
+        <article>
+          <span class="section-label">01 · Templates</span>
+          <strong>Portfolio or your files</strong>
+          <p>Use the curated portfolio template, or upload HTML/CSS/JS to a certified asset canister.</p>
+        </article>
+        <article>
+          <span class="section-label">02 · Pay once</span>
+          <strong>Fixed price, any token</strong>
+          <p>NEAR 1Click quotes the exact amount for the settlement asset. No ICP wallet required to pay.</p>
+        </article>
+        <article>
+          <span class="section-label">03 · Own it</span>
+          <strong>You control the canister</strong>
+          <p>Your Internet Identity principal is controller. Top up cycles later from My apps.</p>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function renderHowView(): string {
+  return `
+    <section class="how-section view-panel" id="how">
+      <div class="section-intro compact">
+        <span class="section-number">Guide</span>
+        <div>
+          <span class="kicker">How NearLaunch works</span>
+          <h2>From intent to live canister.</h2>
+          <p class="section-lede">Follow this flow once. After your first app is live, reuse My apps for top-ups and edits.</p>
+        </div>
+      </div>
+      <div class="architecture">
+        <article><span>01</span><strong>Sign in</strong><p>Internet Identity creates an app-specific principal. That principal becomes controller of canisters you deploy.</p></article>
+        <article><span>02</span><strong>Configure</strong><p>Choose a template or upload a static site. Starter cycles (${html(cycles(configuredInitialDeployCycles()))}) are included in the deploy price.</p></article>
+        <article><span>03</span><strong>Pay</strong><p>NEAR 1Click quotes the exact source-token amount for the fixed settlement target. Send only that amount.</p></article>
+        <article><span>04</span><strong>Deploy</strong><p>After settlement proof lands on ICP, deploy creates your canister. Static sites then upload files from this browser tab.</p></article>
+      </div>
+      <div class="guide-details">
+        <details class="guide-card" open>
+          <summary>What you need before starting</summary>
+          <ul>
+            <li>A modern browser (for Internet Identity passkeys).</li>
+            <li>A wallet/address on a chain supported by NEAR Intents for payment and refunds.</li>
+            <li>For static sites: a folder with <code>index.html</code> at the site root. Keep the tab open until upload finishes.</li>
+          </ul>
+        </details>
+        <details class="guide-card">
+          <summary>Where to click in this app</summary>
+          <ul>
+            <li><strong>Home</strong> — overview and checklist.</li>
+            <li><strong>Launch</strong> — pick template, configure, pay, and deploy (one order at a time).</li>
+            <li><strong>My apps</strong> — history; open an order to manage cycles or live content.</li>
+            <li><strong>Guide</strong> — this page.</li>
+          </ul>
+        </details>
+        <details class="guide-card">
+          <summary>Cycles and cost (kept conservative)</summary>
+          <ul>
+            <li>Deploy price includes template fee + service fee + marked-up starter cycles.</li>
+            <li>Top-ups charge only the cycles you choose, plus markup — buy only what you need.</li>
+            <li>Querying balances and browsing templates uses cheap query calls; paid updates happen only when you create orders or save live config.</li>
+          </ul>
+        </details>
+      </div>
+    </section>
+  `;
+}
+
+function renderLaunchView(): string {
+  const template = activeTemplate();
+  const managingOrder = currentOrder !== null;
+  const managingLiveApp =
+    currentOrder?.status === "Live" &&
+    Boolean(currentOrder.createdCanisterId) &&
+    !isTopUpOrder(currentOrder);
+  const canCreateOrder =
+    signedIn &&
+    publicConfig?.ordersEnabled &&
+    paymentConfigMatches() &&
+    relayerReadyForOrders() &&
+    factoryCanDeploy() &&
+    !busy;
+
+  return `
+    <section class="launch-section view-panel" id="launch">
+      <div class="section-intro compact">
+        <span class="section-number">Launch</span>
+        <div>
+          <span class="kicker">Deploy workspace</span>
+          <h2>What are we launching?</h2>
+          <p class="section-lede">Pick a template, configure it, then create an order. Payment and deploy stay on this page so you never lose the flow.</p>
+        </div>
+      </div>
+      ${renderLaunchSteps()}
+      ${renderAvailability()}
+      ${
+        managingOrder
+          ? ""
+          : `
+            <div class="template-grid">${renderTemplateCards()}</div>
+          `
+      }
+
+      <div class="builder-grid ${managingOrder ? "builder-grid--managing-order" : ""} ${managingLiveApp ? "builder-grid--live-app" : ""}">
+        <form class="builder-form" id="launch-form">
+          <div class="form-heading">
+            <span class="section-label">Configure ${html(template?.name || "app")}</span>
+            <span class="price-preview" id="price-preview">from ${deployBreakdown ? money(deployBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
+          </div>
+          ${
+            isStaticSiteTemplate(selectedTemplate)
+              ? renderStaticSiteBuilder()
+              : `
+                <div class="field-row">
+                  <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
+                  ${renderAccentColorField(draftConfig.accentColor)}
+                </div>
+                <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
+                <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
+                <div class="field-row">
+                  <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
+                  <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
+                </div>
+                <details class="advanced-config" ${showAdvancedConfig ? "open" : ""} data-advanced-config>
+                  <summary>More details, media &amp; projects <span class="muted">(optional)</span></summary>
+                  <div class="advanced-config-body">
+                    <label>About<textarea name="about" maxlength="2000">${html(draftConfig.about)}</textarea></label>
+                    ${renderHeroImageField(draftConfig.heroImageUrl)}
+                    <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
+                    <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
+                    <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
+                    ${renderProjectsEditor(draftConfig.projects)}
+                    ${renderAppPreview(
+                      draftConfig,
+                      selectedTemplate,
+                      "Updates as you type",
+                      "draft-preview-frame",
+                    )}
+                  </div>
+                </details>
+              `
+          }
+          <div class="starter-cycles-note">
+            <span class="section-label">Pay as you go</span>
+            <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from My apps when a canister is live.</p>
+          </div>
+          <div id="pricing-breakdown">${renderDeployPriceBreakdown(deployBreakdown)}</div>
+          <button class="button primary wide" type="submit" ${canCreateOrder ? "" : "disabled"}>
+            ${
+              signedIn
+                ? !paymentConfigMatches()
+                  ? "Payment configuration mismatch"
+                  : !relayerReadyForOrders()
+                    ? "Payment service unavailable"
+                    : !factoryCanDeploy()
+                      ? "Factory needs more cycles"
+                  : publicConfig?.ordersEnabled
+                    ? isStaticSiteTemplate(selectedTemplate)
+                      ? "Create static site order"
+                      : "Create deployment order"
+                    : "New orders are paused"
+                : "Sign in to create an order"
+            }
+          </button>
+        </form>
+        <aside class="order-pane">
+          <div class="pane-top">
+            <span class="section-label">${managingLiveApp ? "Manage live app" : "Live order state"}</span>
+            <span class="pulse"></span>
+          </div>
+          ${
+            managingOrder
+              ? `<button class="button ghost new-deployment-button" id="new-deployment-button" type="button">Configure new deployment</button>`
+              : `<p class="order-pane-hint muted">After you create an order, payment quotes and deploy controls appear here.</p>`
+          }
+          ${renderCurrentOrder()}
+        </aside>
+      </div>
+    </section>
+  `;
+}
+
+function renderAppsView(): string {
+  return `
+    <section class="apps-section view-panel" id="apps">
+      <div class="section-intro compact">
+        <span class="section-number">Apps</span>
+        <div>
+          <span class="kicker">Deployment registry</span>
+          <h2>Your apps, on-chain.</h2>
+          <p class="section-lede">Open an order to pay, deploy, top up cycles, or edit a live app. History is tied to your Internet Identity principal.</p>
+        </div>
+      </div>
+      ${renderPrincipalPanel()}
+      <div class="apps-table">${renderOrders()}</div>
+      ${
+        signedIn && orders.length === 0
+          ? `<div class="empty-cta"><a class="button primary" href="#launch" data-nav="launch">Create your first order</a></div>`
+          : !signedIn
+            ? `<div class="empty-cta"><button class="button primary" id="apps-sign-in" type="button">Sign in to view apps</button></div>`
+            : ""
+      }
+    </section>
+  `;
+}
+
 function renderAdmin(): string {
   if (!adminAccess?.isAdmin || !publicConfig) return "";
   const pricing = publicConfig.pricing;
 
   return `
-    <section class="admin-section" id="admin">
+    <section class="admin-section view-panel" id="admin">
       <div class="section-intro compact">
-        <span class="section-number">03</span>
-        <div><span class="kicker">Platform controls</span><h2>Admin dashboard.</h2></div>
-        <p>Pricing and payment configuration are stored on-chain and applied to new orders only. Revenue settles off-ICP to your NEAR treasury.</p>
+        <span class="section-number">Admin</span>
+        <div>
+          <span class="kicker">Platform controls</span>
+          <h2>Admin dashboard.</h2>
+          <p class="section-lede">Pricing and payment configuration are stored on-chain and applied to new orders only. Revenue settles off-ICP to your NEAR treasury.</p>
+        </div>
       </div>
 
       <div class="admin-status-grid">
@@ -1866,31 +2258,30 @@ function renderAdmin(): string {
   `;
 }
 
+function renderActiveView(): string {
+  switch (currentView) {
+    case "launch":
+      return renderLaunchView();
+    case "apps":
+      return renderAppsView();
+    case "how":
+      return renderHowView();
+    case "admin":
+      return renderAdmin() || renderHomeView();
+    case "home":
+    default:
+      return renderHomeView();
+  }
+}
+
 function render(): void {
-  const template = activeTemplate();
-  const managingOrder = currentOrder !== null;
-  const managingLiveApp =
-    currentOrder?.status === "Live" &&
-    Boolean(currentOrder.createdCanisterId) &&
-    !isTopUpOrder(currentOrder);
-  const canCreateOrder =
-    signedIn &&
-    publicConfig?.ordersEnabled &&
-    paymentConfigMatches() &&
-    relayerReadyForOrders() &&
-    factoryCanDeploy() &&
-    !busy;
+  syncViewFromHash();
 
   app.innerHTML = `
     <div class="site-shell">
       <header class="topbar">
-        <a class="brand" href="#"><span class="brand-glyph">N</span><span>NearLaunch <small>for ICP</small></span></a>
-        <nav>
-          <a href="#launch">Launch</a>
-          <a href="#apps">My apps</a>
-          ${adminAccess?.isAdmin ? `<a href="#admin">Admin</a>` : ""}
-          <a href="#how">How it works</a>
-        </nav>
+        <a class="brand" href="#home" data-nav="home"><span class="brand-glyph">N</span><span>NearLaunch <small>for ICP</small></span></a>
+        ${renderNav()}
         ${
           signedIn
             ? `
@@ -1908,139 +2299,18 @@ function render(): void {
             `
         }
       </header>
+      <nav class="mobile-nav" aria-label="Mobile">
+        ${renderNav()}
+      </nav>
 
       <main>
-        <section class="hero">
-          <div class="hero-copy">
-            <div class="eyebrow"><span>NEAR Intents</span><i></i><span>Internet Computer</span></div>
-            <h1>Ask for an app.<br /><em>Get a live canister.</em></h1>
-            <p>Deploy a real ICP application with starter cycles, monitor balance, and top up on demand through NEAR Intents.</p>
-            <a class="button primary" href="#launch">Start a deployment</a>
-          </div>
-          <div class="hero-console" aria-label="Deployment flow preview">
-            <div class="console-top"><span></span><span></span><span></span><small>intent.deploy</small></div>
-            <div class="console-body">
-              <div><small>OUTCOME</small><strong>Launch "Northstar" on ICP</strong></div>
-              <div class="console-route"><span>Source token</span><b>-&gt;</b><span>NEAR Intents</span><b>-&gt;</b><span>${html(publicConfig?.paymentDisplay.settlementSymbol || "USDC")}</span></div>
-              <pre><code><span>template</span> portfolio
-<span>starter</span> 2T cycles
-<span>controller</span> user principal
-<span>status</span> <b>ready to deploy</b></code></pre>
-            </div>
-          </div>
-          <div class="hero-stats">
-            <div><strong>${stats.liveApps.toString()}</strong><small>apps launched</small></div>
-            <div><strong>${stats.templates.toString()}</strong><small>approved templates</small></div>
-            <div><strong>${stats.totalOrders.toString()}</strong><small>on-chain orders</small></div>
-          </div>
-        </section>
-
-        <section class="launch-section" id="launch">
-          <div class="section-intro">
-            <span class="section-number">01</span>
-            <div><span class="kicker">Choose the outcome</span><h2>What are we launching?</h2></div>
-            <p>Pick a curated template or upload your own static site files. The factory installs approved Wasm and hosts your project on ICP.</p>
-          </div>
-          ${renderAvailability()}
-          <div class="template-grid">${renderTemplateCards()}</div>
-
-          <div class="builder-grid ${managingOrder ? "builder-grid--managing-order" : ""} ${managingLiveApp ? "builder-grid--live-app" : ""}">
-            <form class="builder-form" id="launch-form">
-              <div class="form-heading">
-                <span class="section-label">Configure ${html(template?.name || "app")}</span>
-                <span class="price-preview" id="price-preview">from ${deployBreakdown ? money(deployBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
-              </div>
-              ${
-                isStaticSiteTemplate(selectedTemplate)
-                  ? renderStaticSiteBuilder()
-                  : `
-                    <div class="field-row">
-                      <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
-                      ${renderAccentColorField(draftConfig.accentColor)}
-                    </div>
-                    <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
-                    <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
-                    <label>About<textarea name="about" maxlength="2000">${html(draftConfig.about)}</textarea></label>
-                    <div class="field-row">
-                      <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
-                      <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
-                    </div>
-                    ${renderHeroImageField(draftConfig.heroImageUrl)}
-                    <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
-                    <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
-                    <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
-                    ${renderProjectsEditor(draftConfig.projects)}
-                    ${renderAppPreview(
-                      draftConfig,
-                      selectedTemplate,
-                      "Updates as you type",
-                      "draft-preview-frame",
-                    )}
-                  `
-              }
-              <div class="starter-cycles-note">
-                <span class="section-label">Pay as you go</span>
-                <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from your live app panel.</p>
-              </div>
-              <div id="pricing-breakdown">${renderDeployPriceBreakdown(deployBreakdown)}</div>
-              <button class="button primary wide" type="submit" ${canCreateOrder ? "" : "disabled"}>
-                ${
-                  signedIn
-                    ? !paymentConfigMatches()
-                      ? "Payment configuration mismatch"
-                      : !relayerReadyForOrders()
-                        ? "Payment service unavailable"
-                        : !factoryCanDeploy()
-                          ? "Factory needs more cycles"
-                      : publicConfig?.ordersEnabled
-                        ? isStaticSiteTemplate(selectedTemplate)
-                          ? "Create static site order"
-                          : "Create deployment order"
-                        : "New orders are paused"
-                    : "Sign in to create an order"
-                }
-              </button>
-            </form>
-            <aside class="order-pane">
-              <div class="pane-top">
-                <span class="section-label">${managingLiveApp ? "Manage live app" : "Live order state"}</span>
-                <span class="pulse"></span>
-              </div>
-              ${
-                managingOrder
-                  ? `<button class="button ghost new-deployment-button" id="new-deployment-button" type="button">Configure new deployment</button>`
-                  : ""
-              }
-              ${renderCurrentOrder()}
-            </aside>
-          </div>
-        </section>
-
-        <section class="apps-section" id="apps">
-          <div class="section-intro compact">
-            <span class="section-number">02</span>
-            <div><span class="kicker">Deployment registry</span><h2>Your apps, on-chain.</h2></div>
-          </div>
-          ${renderPrincipalPanel()}
-          <div class="apps-table">${renderOrders()}</div>
-        </section>
-
-        ${renderAdmin()}
-
-        <section class="how-section" id="how">
-          <div class="section-intro compact">
-            <span class="section-number">${adminAccess?.isAdmin ? "04" : "03"}</span>
-            <div><span class="kicker">Chain abstraction, applied</span><h2>One outcome, four systems.</h2></div>
-          </div>
-          <div class="architecture">
-            <article><span>01</span><strong>Express intent</strong><p>Pick a template, configure content, and start with 2T cycles.</p></article>
-            <article><span>02</span><strong>Route payment</strong><p>NEAR 1Click quotes the exact source-token amount for the fixed settlement target.</p></article>
-            <article><span>03</span><strong>Verify settlement</strong><p>The authorized relayer submits a replay-safe proof to ICP.</p></article>
-            <article><span>04</span><strong>Create canister</strong><p>The factory installs approved Wasm, funds the app, and lets you top up later.</p></article>
-          </div>
-        </section>
+        ${renderActiveView()}
       </main>
-      <footer><span>NearLaunch for ICP</span><span>Outcome-driven deployment infrastructure</span><a href="https://docs.near-intents.org/" target="_blank" rel="noreferrer">NEAR Intents docs ^</a></footer>
+      <footer>
+        <span>NearLaunch for ICP</span>
+        <span>Outcome-driven deployment · conservative cycles</span>
+        <a href="https://docs.near-intents.org/" target="_blank" rel="noreferrer">NEAR Intents docs ^</a>
+      </footer>
       ${notice ? `<div class="toast">${html(notice)}</div>` : ""}
     </div>
   `;
@@ -2053,8 +2323,19 @@ function bindEvents(): void {
   document.querySelector("#identity-button")?.addEventListener("click", () => {
     void signIn();
   });
+  document.querySelector("#guide-sign-in")?.addEventListener("click", () => {
+    void signIn();
+  });
+  document.querySelector("#apps-sign-in")?.addEventListener("click", () => {
+    void signIn();
+  });
   document.querySelector("#sign-out-button")?.addEventListener("click", () => {
     void signOut();
+  });
+  document.querySelectorAll<HTMLDetailsElement>("[data-advanced-config]").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      showAdvancedConfig = details.open;
+    });
   });
   document.querySelectorAll<HTMLElement>("[data-copy-principal]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -3290,6 +3571,22 @@ async function updateRelayer(form: HTMLFormElement): Promise<void> {
 }
 
 async function init(): Promise<void> {
+  window.addEventListener("hashchange", () => {
+    const previous = currentView;
+    syncViewFromHash();
+    if (previous !== currentView) {
+      // Keep in-memory draft/order state; only swap the visible workspace.
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      render();
+    }
+  });
+
+  // Normalize empty hash to #home so nav active states stay consistent.
+  if (!location.hash || location.hash === "#") {
+    history.replaceState(null, "", "#home");
+  }
+  syncViewFromHash();
+
   try {
     signedIn = authClient.isAuthenticated();
     if (signedIn) {
