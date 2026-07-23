@@ -144,7 +144,8 @@ let signedIn = false;
 let principal = "";
 let templates: Template[] = [];
 let orders: DeploymentOrder[] = [];
-let selectedTemplate = "portfolio";
+/** Static site is the default Launch selection — most flexible BYO hosting path. */
+let selectedTemplate = "static-site";
 let staticSiteFiles: File[] = [];
 let staticSiteFilesByOrderId = new Map<bigint, File[]>();
 let staticSiteLiveFiles: File[] = [];
@@ -171,9 +172,21 @@ let busyMessage = "";
 /** Client-side page: only one primary workspace is shown at a time. */
 type AppView = "home" | "launch" | "apps" | "how" | "admin";
 let currentView: AppView = parseViewFromHash();
-/** Keep optional portfolio fields collapsed until the user opens them. */
-let showAdvancedConfig = false;
-let draftConfig: AppPreviewConfig = {
+/** Section open-state for portfolio/landing customization panels. */
+let openConfigSections: Record<string, boolean> = {
+  branding: true,
+  content: true,
+  links: true,
+  skills: true,
+  socials: true,
+  projects: true,
+  preview: true,
+};
+/** Live app management workspace tab. */
+type LiveManageTab = "content" | "cycles" | "files";
+let liveManageTab: LiveManageTab = "content";
+
+const DEFAULT_PORTFOLIO_CONFIG: AppPreviewConfig = {
   name: "Open Horizon Studio",
   headline: "Designing useful systems for ambitious teams.",
   description:
@@ -201,6 +214,36 @@ let draftConfig: AppPreviewConfig = {
     },
   ],
 };
+
+const DEFAULT_STARTUP_CONFIG: AppPreviewConfig = {
+  name: "Northstar",
+  headline: "Ship the product your users already want.",
+  description:
+    "A focused landing page for your product story, primary call to action, and social proof — hosted on the Internet Computer.",
+  accentColor: "#4f8cff",
+  primaryLink: "https://example.com",
+  contact: "hello@example.com",
+  about:
+    "Northstar helps teams go from intent to a live product page with clear messaging, links, and owner-managed updates after launch.",
+  heroImageUrl: "",
+  resumeUrl: "",
+  skills: ["Product", "Growth", "ICP"],
+  socialLinks: [
+    { labelText: "Twitter", url: "https://twitter.com" },
+    { labelText: "Docs", url: "https://example.com/docs" },
+  ],
+  projects: [
+    {
+      title: "Feature highlight",
+      description: "Describe a capability, integration, or case study your visitors should notice first.",
+      url: "https://example.com/feature",
+      imageUrl: "",
+      tags: ["Launch", "Product"],
+    },
+  ],
+};
+
+let draftConfig: AppPreviewConfig = staticSiteConfigFromDraft("My static site", []);
 
 function parseViewFromHash(): AppView {
   const raw = (location.hash || "#home").replace(/^#/, "").split(/[/?]/)[0] || "home";
@@ -358,9 +401,56 @@ function isHttpsUrl(value: string): boolean {
 }
 
 const MAX_PROJECTS = 8;
+const MAX_SOCIAL_LINKS = 6;
 
 function emptyProject(): AppPreviewProject {
   return { title: "", description: "", url: "", imageUrl: "", tags: [] };
+}
+
+function emptySocialLink(): AppPreviewLink {
+  return { labelText: "", url: "" };
+}
+
+function defaultConfigForTemplate(templateId: string): AppPreviewConfig {
+  if (isStaticSiteTemplate(templateId)) {
+    return staticSiteConfigFromDraft("My static site", staticSiteFiles);
+  }
+  if (templateId === "startup") {
+    return { ...DEFAULT_STARTUP_CONFIG, socialLinks: [...DEFAULT_STARTUP_CONFIG.socialLinks], skills: [...DEFAULT_STARTUP_CONFIG.skills], projects: DEFAULT_STARTUP_CONFIG.projects.map((project) => ({ ...project, tags: [...project.tags] })) };
+  }
+  return {
+    ...DEFAULT_PORTFOLIO_CONFIG,
+    socialLinks: [...DEFAULT_PORTFOLIO_CONFIG.socialLinks],
+    skills: [...DEFAULT_PORTFOLIO_CONFIG.skills],
+    projects: DEFAULT_PORTFOLIO_CONFIG.projects.map((project) => ({
+      ...project,
+      tags: [...project.tags],
+    })),
+  };
+}
+
+function configSectionOpen(id: string, defaultOpen = true): boolean {
+  if (id in openConfigSections) return openConfigSections[id] !== false;
+  return defaultOpen;
+}
+
+function renderConfigSection(
+  id: string,
+  title: string,
+  help: string,
+  body: string,
+  defaultOpen = true,
+): string {
+  const open = configSectionOpen(id, defaultOpen);
+  return `
+    <details class="config-section" data-config-section="${html(id)}" ${open ? "open" : ""}>
+      <summary>
+        <span>${html(title)}</span>
+        <span class="muted config-section-help">${html(help)}</span>
+      </summary>
+      <div class="config-section-body">${body}</div>
+    </details>
+  `;
 }
 
 function normalizeProject(project: AppPreviewProject): AppPreviewProject {
@@ -863,9 +953,19 @@ function renderAvailability(): string {
   `;
 }
 
+function orderedActiveTemplates(): Template[] {
+  const active = templates.filter((template) => template.active);
+  const rank = (id: string): number => {
+    if (id === "static-site") return 0;
+    if (id === "portfolio") return 1;
+    if (id === "startup") return 2;
+    return 10;
+  };
+  return [...active].sort((left, right) => rank(left.id) - rank(right.id));
+}
+
 function renderTemplateCards(): string {
-  return templates
-    .filter((template) => template.active)
+  return orderedActiveTemplates()
     .map((template, index) => {
       const minimum =
         template.id === selectedTemplate && deployBreakdown
@@ -873,8 +973,12 @@ function renderTemplateCards(): string {
           : template.basePriceUsdCents +
             (publicConfig?.pricing.serviceFeeUsdCents || 0n);
       const uploadBadge = isStaticSiteTemplate(template.id)
-        ? `<span class="template-badge">Upload files</span>`
-        : "";
+        ? `<span class="template-badge">Default · Upload files</span>`
+        : template.id === "portfolio"
+          ? `<span class="template-badge template-badge--soft">Customizable</span>`
+          : template.id === "startup"
+            ? `<span class="template-badge template-badge--soft">Landing page</span>`
+            : "";
       return `
         <button class="template-card ${template.id === selectedTemplate ? "selected" : ""} ${isStaticSiteTemplate(template.id) ? "template-card--static-site" : ""}"
           data-template="${html(template.id)}" type="button">
@@ -1101,19 +1205,280 @@ function renderProjectsEditor(projects: AppPreviewProject[]): string {
       ? projects
           .map((project, index) => renderProjectCard(index, project, index + 1))
           .join("")
-      : `<p class="projects-empty">No projects yet. Add up to ${MAX_PROJECTS} pieces of work to feature on your portfolio.</p>`;
+      : `<p class="projects-empty">No projects yet. Add up to ${MAX_PROJECTS} pieces of work to feature on your page.</p>`;
 
   return `
     <section class="projects-editor" data-projects-editor>
       <div class="projects-editor-header">
         <div>
-          <span class="section-label">Portfolio projects</span>
-          <p class="field-help">Optional highlighted work shown on your live app. Each project has its own fields — no special formatting required.</p>
+          <span class="section-label">Featured projects / case studies</span>
+          <p class="field-help">Each card supports title, description, link, tags, and an optional image (HTTPS or upload). Up to ${MAX_PROJECTS}.</p>
         </div>
         <button class="button secondary project-add" type="button" data-add-project ${projects.length >= MAX_PROJECTS ? "disabled" : ""}>Add project</button>
       </div>
       <div class="projects-editor-list" data-projects-list>${cards}</div>
     </section>
+  `;
+}
+
+function renderSocialLinkCard(
+  index: number,
+  link: AppPreviewLink,
+  displayNumber: number,
+): string {
+  return `
+    <article class="social-editor-card" data-social-card data-social-index="${index}">
+      <div class="project-editor-heading">
+        <strong>Link ${displayNumber}</strong>
+        <button class="button ghost" type="button" data-remove-social="${index}">Remove</button>
+      </div>
+      <div class="field-row">
+        <label>Label
+          <input name="social-${index}-label" maxlength="32" placeholder="GitHub" value="${html(link.labelText)}" />
+        </label>
+        <label>URL
+          <input name="social-${index}-url" type="url" placeholder="https://..." value="${html(link.url)}" />
+        </label>
+      </div>
+    </article>
+  `;
+}
+
+function renderSocialLinksEditor(links: AppPreviewLink[]): string {
+  const cards =
+    links.length > 0
+      ? links.map((link, index) => renderSocialLinkCard(index, link, index + 1)).join("")
+      : `<p class="projects-empty">No social or external links yet. Add up to ${MAX_SOCIAL_LINKS}.</p>`;
+
+  return `
+    <section class="social-editor" data-social-editor>
+      <div class="projects-editor-header">
+        <div>
+          <span class="section-label">Social &amp; external links</span>
+          <p class="field-help">Shown as buttons on your live page (GitHub, X, Docs, etc.). Label + https URL per row.</p>
+        </div>
+        <button class="button secondary" type="button" data-add-social ${links.length >= MAX_SOCIAL_LINKS ? "disabled" : ""}>Add link</button>
+      </div>
+      <div class="social-editor-list" data-social-list>${cards}</div>
+    </section>
+  `;
+}
+
+function socialFieldValue(form: HTMLFormElement, index: string, suffix: string): string {
+  const field = form.elements.namedItem(`social-${index}-${suffix}`);
+  if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) {
+    return field.value;
+  }
+  return "";
+}
+
+function socialLinksFromForm(form: HTMLFormElement): AppPreviewLink[] {
+  const cards = [...form.querySelectorAll<HTMLElement>("[data-social-card]")];
+  cards.sort(
+    (left, right) =>
+      Number(left.dataset.socialIndex || 0) - Number(right.dataset.socialIndex || 0),
+  );
+  const links: AppPreviewLink[] = [];
+  for (const card of cards) {
+    const index = card.dataset.socialIndex;
+    if (!index) continue;
+    const labelText = socialFieldValue(form, index, "label").trim();
+    const url = socialFieldValue(form, index, "url").trim();
+    if (!labelText && !url) continue;
+    links.push({ labelText, url });
+  }
+  if (links.length > 0) return links.slice(0, MAX_SOCIAL_LINKS);
+
+  // Fallback for any residual textarea-based form markup.
+  const legacy = form.elements.namedItem("socialLinks");
+  if (legacy instanceof HTMLTextAreaElement) {
+    return linksFromText(legacy.value);
+  }
+  return [];
+}
+
+function updateAddSocialButton(form: HTMLFormElement): void {
+  const button = form.querySelector<HTMLButtonElement>("[data-add-social]");
+  if (!button) return;
+  button.disabled = form.querySelectorAll("[data-social-card]").length >= MAX_SOCIAL_LINKS;
+}
+
+function renumberSocialCards(form: HTMLFormElement): void {
+  form.querySelectorAll<HTMLElement>("[data-social-card]").forEach((card, index) => {
+    const heading = card.querySelector(".project-editor-heading strong");
+    if (heading) heading.textContent = `Link ${index + 1}`;
+  });
+}
+
+function addSocialToForm(form: HTMLFormElement, refreshPreview: () => void): void {
+  const list = form.querySelector("[data-social-list]");
+  if (!list) return;
+  const cards = form.querySelectorAll("[data-social-card]");
+  if (cards.length >= MAX_SOCIAL_LINKS) return;
+  form.querySelector("[data-social-list] .projects-empty")?.remove();
+  const indices = [...cards].map((card) =>
+    Number((card as HTMLElement).dataset.socialIndex || 0),
+  );
+  const nextIndex = indices.length > 0 ? Math.max(...indices) + 1 : 0;
+  list.insertAdjacentHTML(
+    "beforeend",
+    renderSocialLinkCard(nextIndex, emptySocialLink(), cards.length + 1),
+  );
+  updateAddSocialButton(form);
+  refreshPreview();
+}
+
+function removeSocialFromForm(
+  form: HTMLFormElement,
+  index: string | undefined,
+  refreshPreview: () => void,
+): void {
+  if (!index) return;
+  form
+    .querySelector(`[data-social-card][data-social-index="${index}"]`)
+    ?.remove();
+  const list = form.querySelector("[data-social-list]");
+  const cards = form.querySelectorAll("[data-social-card]");
+  if (cards.length === 0 && list) {
+    list.innerHTML = `<p class="projects-empty">No social or external links yet. Add up to ${MAX_SOCIAL_LINKS}.</p>`;
+  } else {
+    renumberSocialCards(form);
+  }
+  updateAddSocialButton(form);
+  refreshPreview();
+}
+
+function bindSocialLinksEditor(
+  form: HTMLFormElement,
+  refreshPreview: () => void,
+): void {
+  form.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.closest("[data-add-social]")) {
+      event.preventDefault();
+      addSocialToForm(form, refreshPreview);
+      return;
+    }
+    const removeButton = target.closest<HTMLElement>("[data-remove-social]");
+    if (removeButton) {
+      event.preventDefault();
+      removeSocialFromForm(form, removeButton.dataset.removeSocial, refreshPreview);
+    }
+  });
+}
+
+function renderAppConfigBuilder(
+  config: AppPreviewConfig,
+  templateId: string,
+  options: { formId: string; frameId: string; live?: boolean },
+): string {
+  const isStartup = templateId === "startup";
+  const nameLabel = isStartup ? "Product name" : "Display name";
+  const headlineLabel = isStartup ? "Hero headline" : "Headline";
+  const descriptionLabel = isStartup ? "Product pitch" : "Short bio / description";
+  const aboutLabel = isStartup ? "Longer story" : "About section";
+  const primaryLabel = isStartup ? "Primary CTA URL" : "Primary link";
+  const secondaryLabel = isStartup ? "Secondary link (docs, waitlist…)" : "Resume / CV link";
+  const skillsLabel = isStartup ? "Keywords / tags" : "Skills";
+  const projectsHelp = isStartup
+    ? "Feature highlights, case studies, or product modules"
+    : "Selected work and case studies";
+
+  return `
+    <form class="${options.live ? "live-config-form" : "builder-config-form"}" id="${html(options.formId)}">
+      ${
+        options.live
+          ? `
+            <div class="form-heading">
+              <div>
+                <span class="section-label">Edit live content</span>
+                <h4>Customize your deployed ${isStartup ? "landing page" : "portfolio"}</h4>
+                <p class="field-help">Saves to your app canister (one update call). Preview updates as you type.</p>
+              </div>
+              <button class="button primary" type="submit">Save live app</button>
+            </div>
+          `
+          : `
+            <p class="builder-tip">Customize every section below. Optional blocks can be left empty and hidden on the live page. You can edit all of this again after deployment from <strong>My apps</strong>.</p>
+          `
+      }
+      ${renderConfigSection(
+        "branding",
+        "Branding",
+        "Name, color, hero image",
+        `
+          <div class="field-row">
+            <label>${nameLabel}<input name="name" required maxlength="80" value="${html(config.name)}" /></label>
+            ${renderAccentColorField(config.accentColor)}
+          </div>
+          ${renderHeroImageField(config.heroImageUrl)}
+        `,
+      )}
+      ${renderConfigSection(
+        "content",
+        "Page content",
+        "Headline, description, about",
+        `
+          <label>${headlineLabel}<input name="headline" required maxlength="140" value="${html(config.headline)}" /></label>
+          <label>${descriptionLabel}<textarea name="description" required maxlength="1200" rows="3">${html(config.description)}</textarea></label>
+          <label>${aboutLabel}<textarea name="about" maxlength="2000" rows="4">${html(config.about)}</textarea></label>
+        `,
+      )}
+      ${renderConfigSection(
+        "links",
+        "Calls to action",
+        "Primary action, contact, secondary link",
+        `
+          <div class="field-row">
+            <label>${primaryLabel}<input name="primaryLink" type="url" placeholder="https://..." value="${html(config.primaryLink)}" /></label>
+            <label>Contact (email or handle)<input name="contact" placeholder="hello@example.com" value="${html(config.contact)}" /></label>
+          </div>
+          <label>${secondaryLabel}<input name="resumeUrl" type="url" placeholder="https://..." value="${html(config.resumeUrl)}" /></label>
+          <p class="field-help">Primary link becomes the main button (${isStartup ? "Get started" : "Explore the work"}). Secondary link becomes the outline button when set.</p>
+        `,
+      )}
+      ${renderConfigSection(
+        "skills",
+        skillsLabel,
+        "Up to 12 chips",
+        `
+          <label>${skillsLabel}
+            <textarea name="skills" maxlength="500" rows="2" placeholder="Product strategy, Frontend, ICP">${html(config.skills.join(", "))}</textarea>
+          </label>
+          <p class="field-help">Comma-separated. Shown as chips beside your about section.</p>
+        `,
+      )}
+      ${renderConfigSection(
+        "socials",
+        "Social & external links",
+        "Up to 6 labeled buttons",
+        renderSocialLinksEditor(config.socialLinks),
+      )}
+      ${renderConfigSection(
+        "projects",
+        projectsHelp,
+        `Up to ${MAX_PROJECTS} cards`,
+        renderProjectsEditor(config.projects),
+      )}
+      ${renderConfigSection(
+        "preview",
+        "Live preview",
+        "Updates as you type",
+        renderAppPreview(
+          config,
+          templateId,
+          options.live ? "Updates as you edit" : "Updates as you type",
+          options.frameId,
+        ),
+        true,
+      )}
+      ${
+        options.live
+          ? `<button class="button primary wide" type="submit">Save changes to live app</button>`
+          : ""
+      }
+    </form>
   `;
 }
 
@@ -1213,34 +1578,75 @@ function renderLivePortfolioEditor(
   config: AppPreviewConfig,
   templateId: string,
 ): string {
+  return renderAppConfigBuilder(config, templateId, {
+    formId: "live-config-form",
+    frameId: "live-preview-frame",
+    live: true,
+  });
+}
+
+function renderLiveManageTabs(order: DeploymentOrder): string {
+  const isStatic = isStaticSiteTemplate(order.templateId);
+  const tabs: { id: LiveManageTab; label: string }[] = isStatic
+    ? [
+        { id: "files", label: "Publish files" },
+        { id: "cycles", label: "Cycles" },
+      ]
+    : [
+        { id: "content", label: "Edit content" },
+        { id: "cycles", label: "Cycles" },
+      ];
+  const fallbackTab: LiveManageTab = tabs[0]?.id ?? "content";
+  const active = tabs.some((tab) => tab.id === liveManageTab)
+    ? liveManageTab
+    : fallbackTab;
+  if (active !== liveManageTab) liveManageTab = active;
+
   return `
-    <form class="live-config-form" id="live-config-form">
-      <div class="form-heading">
-        <div>
-          <span class="section-label">Live app admin</span>
-          <h4>Edit your deployed app</h4>
-          <p class="field-help">Changes publish directly to your live ICP app canister.</p>
-        </div>
-        <button class="button secondary" type="submit">Save live app</button>
+    <div class="live-manage-tabs" role="tablist" aria-label="Manage live app">
+      ${tabs
+        .map(
+          (tab) => `
+            <button class="live-manage-tab ${liveManageTab === tab.id ? "is-active" : ""}"
+              type="button" data-live-tab="${tab.id}" role="tab" aria-selected="${liveManageTab === tab.id}">
+              ${tab.label}
+            </button>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderLiveManageWorkspace(order: DeploymentOrder, savedConfig: AppPreviewConfig): string {
+  if (!order.createdCanisterId) return "";
+  const isStatic = isStaticSiteTemplate(order.templateId);
+  const tabs = renderLiveManageTabs(order);
+
+  if (liveManageTab === "cycles") {
+    return `
+      <div class="live-manage-panel">
+        ${tabs}
+        ${renderCycleBalancePanel(order)}
+        ${renderTopUpPanel(order)}
       </div>
-      <div class="field-row">
-        <label>Name<input name="name" required maxlength="80" value="${html(config.name)}" /></label>
-        ${renderAccentColorField(config.accentColor)}
+    `;
+  }
+
+  if (isStatic) {
+    return `
+      <div class="live-manage-panel">
+        ${tabs}
+        ${renderLiveStaticSiteEditor()}
       </div>
-      <label>Headline<input name="headline" required maxlength="140" value="${html(config.headline)}" /></label>
-      <label>Description<textarea name="description" required maxlength="1200">${html(config.description)}</textarea></label>
-      <label>About<textarea name="about" maxlength="2000">${html(config.about)}</textarea></label>
-      <div class="field-row">
-        <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(config.primaryLink)}" /></label>
-        <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(config.contact)}" /></label>
-      </div>
-      ${renderHeroImageField(config.heroImageUrl)}
-      <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(config.resumeUrl)}" /></label>
-      <label>Skills<textarea name="skills" maxlength="500">${html(config.skills.join(", "))}</textarea></label>
-      <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(config.socialLinks))}</textarea></label>
-      ${renderProjectsEditor(config.projects)}
-      ${renderAppPreview(config, templateId, "Updates as you edit", "live-preview-frame")}
-    </form>
+    `;
+  }
+
+  return `
+    <div class="live-manage-panel">
+      ${tabs}
+      ${renderLivePortfolioEditor(savedConfig, order.templateId)}
+    </div>
   `;
 }
 
@@ -1286,16 +1692,6 @@ function renderCurrentOrder(): string {
         </div>
         <span class="status status-${status.toLowerCase()}">${html(statusLabel(status))}</span>
       </div>
-      ${
-        isLive && !topUpOrder
-          ? renderCycleBalancePanel(currentOrder)
-          : ""
-      }
-      ${
-        isLive && !topUpOrder
-          ? renderTopUpPanel(currentOrder)
-          : ""
-      }
       ${
         isLive || topUpOrder
           ? ""
@@ -1437,17 +1833,55 @@ function renderCurrentOrder(): string {
       }
       ${
         isLive && liveAppUrl
-          ? `<a class="live-link" href="${html(liveAppUrl)}" target="_blank" rel="noreferrer">Open live ICP app <span>^</span></a>`
+          ? `
+            <div class="live-app-actions">
+              <a class="live-link" href="${html(liveAppUrl)}" target="_blank" rel="noreferrer">Open live ICP app <span>^</span></a>
+              <button class="button secondary compact" type="button" data-live-tab="${isStaticSiteTemplate(currentOrder.templateId) ? "files" : "content"}">
+                ${isStaticSiteTemplate(currentOrder.templateId) ? "Publish files" : "Edit content"}
+              </button>
+              <button class="button secondary compact" type="button" data-live-tab="cycles">Manage cycles</button>
+            </div>
+          `
           : ""
       }
       ${
-        isLive && currentOrder.createdCanisterId
-          ? isStaticSiteTemplate(currentOrder.templateId)
-            ? renderLiveStaticSiteEditor()
-            : renderLivePortfolioEditor(savedConfig, currentOrder.templateId)
+        isLive && currentOrder.createdCanisterId && !topUpOrder
+          ? renderLiveManageWorkspace(currentOrder, savedConfig)
           : ""
       }
       ${currentOrder.error ? `<p class="error-message">${html(currentOrder.error)}</p>` : ""}
+    </article>
+  `;
+}
+
+function renderOrderRow(order: DeploymentOrder, emphasis: "live" | "progress"): string {
+  const liveAppUrl = order.status === "Live" && !isTopUpOrder(order) ? appUrl(order) : undefined;
+  const kind = isTopUpOrder(order) ? "top-up" : order.templateId;
+  return `
+    <article class="app-row-card app-row-card--${emphasis}">
+      <button class="app-row" data-order="${order.id.toString()}" type="button">
+        <span class="app-mark" style="--mark:${html(order.config.accentColor)}"></span>
+        <span>
+          <strong>${html(order.config.name)}</strong>
+          <small>${html(kind)} · order #${order.id.toString()}</small>
+        </span>
+        <span class="status status-${order.status.toLowerCase()}">${html(statusLabel(order.status))}</span>
+        <span class="row-arrow">Manage</span>
+      </button>
+      <div class="app-row-actions">
+        ${
+          liveAppUrl
+            ? `<a class="button ghost compact" href="${html(liveAppUrl)}" target="_blank" rel="noreferrer">Open</a>`
+            : ""
+        }
+        <button class="button secondary compact" type="button" data-order="${order.id.toString()}" data-manage-tab="${
+          order.status === "Live" && isStaticSiteTemplate(order.templateId)
+            ? "files"
+            : order.status === "Live"
+              ? "content"
+              : "content"
+        }">${order.status === "Live" ? "Edit / manage" : "Continue"}</button>
+      </div>
     </article>
   `;
 }
@@ -1460,16 +1894,41 @@ function renderOrders(): string {
     return `<div class="dashboard-empty">No deployments yet. Your first launch will show up here.</div>`;
   }
 
-  return orders
-    .map((order) => `
-      <button class="app-row" data-order="${order.id.toString()}" type="button">
-        <span class="app-mark" style="--mark:${html(order.config.accentColor)}"></span>
-        <span><strong>${html(order.config.name)}</strong><small>${html(order.templateId)} / pay-as-you-go</small></span>
-        <span class="status status-${order.status.toLowerCase()}">${html(statusLabel(order.status))}</span>
-        <span class="row-arrow">-&gt;</span>
-      </button>
-    `)
-    .join("");
+  const live = orders.filter(
+    (order) => order.status === "Live" && !isTopUpOrder(order),
+  );
+  const inProgress = orders.filter(
+    (order) => !(order.status === "Live" && !isTopUpOrder(order)),
+  );
+
+  return `
+    ${
+      live.length > 0
+        ? `
+          <div class="apps-group">
+            <div class="apps-group-heading">
+              <span class="section-label">Live apps</span>
+              <p class="field-help">Open the site, edit portfolio/landing content, republish static files, or top up cycles.</p>
+            </div>
+            <div class="apps-table">${live.map((order) => renderOrderRow(order, "live")).join("")}</div>
+          </div>
+        `
+        : ""
+    }
+    ${
+      inProgress.length > 0
+        ? `
+          <div class="apps-group">
+            <div class="apps-group-heading">
+              <span class="section-label">Orders in progress</span>
+              <p class="field-help">Unpaid, deploying, top-ups, or failed orders you can continue from Launch.</p>
+            </div>
+            <div class="apps-table">${inProgress.map((order) => renderOrderRow(order, "progress")).join("")}</div>
+          </div>
+        `
+        : ""
+    }
+  `;
 }
 
 function renderPrincipalPanel(): string {
@@ -1594,10 +2053,15 @@ function renderStaticSiteOrderFiles(order: DeploymentOrder): string {
 function renderStaticSiteBuilder(): string {
   return `
     <div class="static-site-intro">
-      <span class="section-label">Bring your own site</span>
-      <p>Upload a built static project (HTML, CSS, JS, images). After payment, NearLaunch creates an asset canister and publishes your files to <code>https://&lt;canister-id&gt;.icp0.io</code>.</p>
+      <span class="section-label">Bring your own site · default</span>
+      <p>Full control: upload any built static project (HTML, CSS, JS, images, fonts). After payment, NearLaunch creates a certified asset canister you control and publishes your files to <code>https://&lt;canister-id&gt;.icp0.io</code>.</p>
     </div>
-    <label>Site name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
+    <label>Site name (shown in your dashboard)
+      <input name="name" required maxlength="80" value="${html(draftConfig.name)}" />
+    </label>
+    <label>Short summary (optional, for your records)
+      <input name="headline" maxlength="140" placeholder="Marketing site v2" value="${html(draftConfig.headline)}" />
+    </label>
     <div class="static-site-upload">
       <label class="file-picker wide">
         <span>Choose project folder</span>
@@ -1607,7 +2071,7 @@ function renderStaticSiteBuilder(): string {
         <span>Or choose individual files</span>
         <input id="static-site-files" type="file" multiple />
       </label>
-      <p class="field-help">Your package must include <code>index.html</code> at the site root. If you pick a project folder, NearLaunch strips the folder name so files publish at <code>/</code> on your canister. Keep this browser tab open until payment, deployment, and file upload finish.</p>
+      <p class="field-help">Package must include <code>index.html</code> at the site root. Folder uploads strip the root folder name so files publish at <code>/</code>. Keep this tab open through payment, deploy, and upload. After launch, republish any time from <strong>My apps → Publish files</strong>.</p>
       ${renderStaticSiteFileList(staticSiteFiles, "static-site-file-list")}
     </div>
   `;
@@ -1618,15 +2082,19 @@ function renderLiveStaticSiteEditor(): string {
     <form class="live-config-form" id="live-static-site-form">
       <div class="form-heading">
         <div>
-          <span class="section-label">Live static site</span>
-          <h4>Publish new files</h4>
-          <p class="field-help">Upload a replacement build to your live asset canister. Existing files with the same path are overwritten.</p>
+          <span class="section-label">Republish static site</span>
+          <h4>Upload a new build</h4>
+          <p class="field-help">Files with the same path overwrite on your live asset canister. You remain the controller — no redeploy order needed.</p>
         </div>
-        <button class="button secondary" type="submit">Publish files</button>
+        <button class="button primary" type="submit">Publish files</button>
       </div>
       <label class="file-picker wide">
-        <span>Choose replacement files</span>
+        <span>Choose project folder</span>
         <input id="static-site-live-files" type="file" multiple webkitdirectory directory />
+      </label>
+      <label class="file-picker wide secondary-picker">
+        <span>Or choose individual files</span>
+        <input id="static-site-live-files-flat" type="file" multiple />
       </label>
       ${renderStaticSiteFileList(staticSiteLiveFiles, "static-site-live-file-list")}
     </form>
@@ -2032,67 +2500,66 @@ function renderLaunchView(): string {
       }
 
       <div class="builder-grid ${managingOrder ? "builder-grid--managing-order" : ""} ${managingLiveApp ? "builder-grid--live-app" : ""}">
-        <form class="builder-form" id="launch-form">
+        <div class="builder-form">
           <div class="form-heading">
             <span class="section-label">Configure ${html(template?.name || "app")}</span>
             <span class="price-preview" id="price-preview">from ${deployBreakdown ? money(deployBreakdown.totalUsdCents) : "$0.00"} ${html(publicConfig?.paymentDisplay.priceCurrency || "USD")}</span>
           </div>
           ${
             isStaticSiteTemplate(selectedTemplate)
-              ? renderStaticSiteBuilder()
-              : `
-                <div class="field-row">
-                  <label>App name<input name="name" required maxlength="80" value="${html(draftConfig.name)}" /></label>
-                  ${renderAccentColorField(draftConfig.accentColor)}
-                </div>
-                <label>Headline<input name="headline" required maxlength="140" value="${html(draftConfig.headline)}" /></label>
-                <label>Description<textarea name="description" required maxlength="1200">${html(draftConfig.description)}</textarea></label>
-                <div class="field-row">
-                  <label>Primary link<input name="primaryLink" type="url" placeholder="https://github.com/..." value="${html(draftConfig.primaryLink)}" /></label>
-                  <label>Contact<input name="contact" placeholder="hello@example.com" value="${html(draftConfig.contact)}" /></label>
-                </div>
-                <details class="advanced-config" ${showAdvancedConfig ? "open" : ""} data-advanced-config>
-                  <summary>More details, media &amp; projects <span class="muted">(optional)</span></summary>
-                  <div class="advanced-config-body">
-                    <label>About<textarea name="about" maxlength="2000">${html(draftConfig.about)}</textarea></label>
-                    ${renderHeroImageField(draftConfig.heroImageUrl)}
-                    <label>Resume<input name="resumeUrl" type="url" placeholder="https://..." value="${html(draftConfig.resumeUrl)}" /></label>
-                    <label>Skills<textarea name="skills" maxlength="500">${html(draftConfig.skills.join(", "))}</textarea></label>
-                    <label>Social links<textarea name="socialLinks" maxlength="1000">${html(linksToText(draftConfig.socialLinks))}</textarea></label>
-                    ${renderProjectsEditor(draftConfig.projects)}
-                    ${renderAppPreview(
-                      draftConfig,
-                      selectedTemplate,
-                      "Updates as you type",
-                      "draft-preview-frame",
-                    )}
+              ? `
+                <form id="launch-form">
+                  ${renderStaticSiteBuilder()}
+                  <div class="starter-cycles-note">
+                    <span class="section-label">Pay as you go</span>
+                    <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from My apps when a canister is live.</p>
                   </div>
-                </details>
+                  <div id="pricing-breakdown">${renderDeployPriceBreakdown(deployBreakdown)}</div>
+                  <button class="button primary wide" type="submit" ${canCreateOrder ? "" : "disabled"}>
+                    ${
+                      signedIn
+                        ? !paymentConfigMatches()
+                          ? "Payment configuration mismatch"
+                          : !relayerReadyForOrders()
+                            ? "Payment service unavailable"
+                            : !factoryCanDeploy()
+                              ? "Factory needs more cycles"
+                          : publicConfig?.ordersEnabled
+                            ? "Create static site order"
+                            : "New orders are paused"
+                        : "Sign in to create an order"
+                    }
+                  </button>
+                </form>
+              `
+              : `
+                ${renderAppConfigBuilder(draftConfig, selectedTemplate, {
+                  formId: "launch-form",
+                  frameId: "draft-preview-frame",
+                })}
+                <div class="starter-cycles-note">
+                  <span class="section-label">Pay as you go</span>
+                  <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from My apps when a canister is live.</p>
+                </div>
+                <div id="pricing-breakdown">${renderDeployPriceBreakdown(deployBreakdown)}</div>
+                <button class="button primary wide" form="launch-form" type="submit" ${canCreateOrder ? "" : "disabled"}>
+                  ${
+                    signedIn
+                      ? !paymentConfigMatches()
+                        ? "Payment configuration mismatch"
+                        : !relayerReadyForOrders()
+                          ? "Payment service unavailable"
+                          : !factoryCanDeploy()
+                            ? "Factory needs more cycles"
+                        : publicConfig?.ordersEnabled
+                          ? "Create deployment order"
+                          : "New orders are paused"
+                      : "Sign in to create an order"
+                  }
+                </button>
               `
           }
-          <div class="starter-cycles-note">
-            <span class="section-label">Pay as you go</span>
-            <p>Each deployment starts with <strong>${cycles(configuredInitialDeployCycles())}</strong> cycles. Top up later from My apps when a canister is live.</p>
-          </div>
-          <div id="pricing-breakdown">${renderDeployPriceBreakdown(deployBreakdown)}</div>
-          <button class="button primary wide" type="submit" ${canCreateOrder ? "" : "disabled"}>
-            ${
-              signedIn
-                ? !paymentConfigMatches()
-                  ? "Payment configuration mismatch"
-                  : !relayerReadyForOrders()
-                    ? "Payment service unavailable"
-                    : !factoryCanDeploy()
-                      ? "Factory needs more cycles"
-                  : publicConfig?.ordersEnabled
-                    ? isStaticSiteTemplate(selectedTemplate)
-                      ? "Create static site order"
-                      : "Create deployment order"
-                    : "New orders are paused"
-                : "Sign in to create an order"
-            }
-          </button>
-        </form>
+        </div>
         <aside class="order-pane">
           <div class="pane-top">
             <span class="section-label">${managingLiveApp ? "Manage live app" : "Live order state"}</span>
@@ -2118,11 +2585,11 @@ function renderAppsView(): string {
         <div>
           <span class="kicker">Deployment registry</span>
           <h2>Your apps, on-chain.</h2>
-          <p class="section-lede">Open an order to pay, deploy, top up cycles, or edit a live app. History is tied to your Internet Identity principal.</p>
+          <p class="section-lede">Manage live sites and continue unpaid orders. Edit portfolio/landing content, republish static files, or top up cycles — all tied to your Internet Identity principal.</p>
         </div>
       </div>
       ${renderPrincipalPanel()}
-      <div class="apps-table">${renderOrders()}</div>
+      ${renderOrders()}
       ${
         signedIn && orders.length === 0
           ? `<div class="empty-cta"><a class="button primary" href="#launch" data-nav="launch">Create your first order</a></div>`
@@ -2332,9 +2799,10 @@ function bindEvents(): void {
   document.querySelector("#sign-out-button")?.addEventListener("click", () => {
     void signOut();
   });
-  document.querySelectorAll<HTMLDetailsElement>("[data-advanced-config]").forEach((details) => {
+  document.querySelectorAll<HTMLDetailsElement>("[data-config-section]").forEach((details) => {
     details.addEventListener("toggle", () => {
-      showAdvancedConfig = details.open;
+      const id = details.dataset.configSection;
+      if (id) openConfigSections[id] = details.open;
     });
   });
   document.querySelectorAll<HTMLElement>("[data-copy-principal]").forEach((button) => {
@@ -2356,10 +2824,10 @@ function bindEvents(): void {
 
   document.querySelectorAll<HTMLElement>("[data-template]").forEach((element) => {
     element.addEventListener("click", () => {
-      selectedTemplate = element.dataset.template || selectedTemplate;
-      if (isStaticSiteTemplate(selectedTemplate)) {
-        draftConfig = staticSiteConfigFromDraft("My static site", staticSiteFiles);
-      }
+      const next = element.dataset.template || selectedTemplate;
+      if (next === selectedTemplate) return;
+      selectedTemplate = next;
+      draftConfig = defaultConfigForTemplate(selectedTemplate);
       void refreshDeployBreakdown().then(() => render());
     });
   });
@@ -2367,8 +2835,36 @@ function bindEvents(): void {
   document.querySelector("#new-deployment-button")?.addEventListener("click", () => {
     currentOrder = null;
     currentQuote = null;
+    liveManageTab = isStaticSiteTemplate(selectedTemplate) ? "files" : "content";
     notice = "Configure a new deployment below.";
     render();
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-live-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const tab = button.dataset.liveTab;
+      if (tab === "content" || tab === "cycles" || tab === "files") {
+        liveManageTab = tab;
+        render();
+      }
+    });
+  });
+
+  document.querySelectorAll<HTMLElement>("[data-manage-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.order;
+      const tab = button.dataset.manageTab;
+      const order = orders.find((candidate) => candidate.id.toString() === id);
+      if (!order) return;
+      if (tab === "content" || tab === "cycles" || tab === "files") {
+        liveManageTab = tab;
+      } else if (isStaticSiteTemplate(order.templateId)) {
+        liveManageTab = "files";
+      } else {
+        liveManageTab = "content";
+      }
+      void selectOrder(order);
+    });
   });
 
   document.querySelector<HTMLFormElement>("#launch-form")?.addEventListener("submit", (event) => {
@@ -2405,12 +2901,17 @@ function bindEvents(): void {
   const launchForm = document.querySelector<HTMLFormElement>("#launch-form");
   if (launchForm) {
     bindProjectsEditor(launchForm, refreshDraftPreview);
+    bindSocialLinksEditor(launchForm, refreshDraftPreview);
   }
   const syncStaticSiteSelection = (files: FileList | null | undefined) => {
     staticSiteFiles = [...files || []];
     const nameField = document.querySelector<HTMLInputElement>("#launch-form input[name='name']");
+    const headlineField = document.querySelector<HTMLInputElement>("#launch-form input[name='headline']");
     const siteName = nameField?.value.trim() || "My static site";
     draftConfig = staticSiteConfigFromDraft(siteName, staticSiteFiles);
+    if (headlineField?.value.trim()) {
+      draftConfig = { ...draftConfig, headline: headlineField.value.trim() };
+    }
     const list = document.querySelector("#static-site-file-list");
     if (list) {
       list.outerHTML = renderStaticSiteFileList(staticSiteFiles, "static-site-file-list");
@@ -2428,14 +2929,20 @@ function bindEvents(): void {
     event.preventDefault();
     void publishLiveStaticSite();
   });
-  document.querySelector<HTMLInputElement>("#static-site-live-files")?.addEventListener("change", (event) => {
-    const input = event.currentTarget;
-    if (!(input instanceof HTMLInputElement)) return;
-    staticSiteLiveFiles = [...input.files || []];
+  const syncLiveStaticSiteFiles = (files: FileList | null | undefined) => {
+    staticSiteLiveFiles = [...files || []];
     const list = document.querySelector("#static-site-live-file-list");
     if (list) {
       list.outerHTML = renderStaticSiteFileList(staticSiteLiveFiles, "static-site-live-file-list");
     }
+  };
+  document.querySelector<HTMLInputElement>("#static-site-live-files")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (input instanceof HTMLInputElement) syncLiveStaticSiteFiles(input.files);
+  });
+  document.querySelector<HTMLInputElement>("#static-site-live-files-flat")?.addEventListener("change", (event) => {
+    const input = event.currentTarget;
+    if (input instanceof HTMLInputElement) syncLiveStaticSiteFiles(input.files);
   });
   const attachOrderStaticSiteFiles = (files: FileList | null | undefined) => {
     if (!currentOrder || !isStaticSiteTemplate(currentOrder.templateId)) return;
@@ -2524,13 +3031,22 @@ function bindEvents(): void {
   const liveConfigForm = document.querySelector<HTMLFormElement>("#live-config-form");
   if (liveConfigForm) {
     bindProjectsEditor(liveConfigForm, refreshLivePreview);
+    bindSocialLinksEditor(liveConfigForm, refreshLivePreview);
   }
 
   document.querySelectorAll<HTMLElement>("[data-order]").forEach((row) => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (event) => {
+      // Nested action buttons use their own handlers.
+      if ((event.target as HTMLElement | null)?.closest("[data-manage-tab]")) return;
       const id = row.dataset.order;
       const order = orders.find((candidate) => candidate.id.toString() === id);
-      if (order) void selectOrder(order);
+      if (!order) return;
+      if (order.status === "Live" && isStaticSiteTemplate(order.templateId)) {
+        liveManageTab = "files";
+      } else if (order.status === "Live") {
+        liveManageTab = "content";
+      }
+      void selectOrder(order);
     });
   });
 
@@ -2630,7 +3146,7 @@ function previewConfigFromForm(
       heroImageUrl: String(data.get("heroImageUrl") || ""),
       resumeUrl: String(data.get("resumeUrl") || ""),
       skills: splitList(String(data.get("skills") || ""), 12),
-      socialLinks: linksFromText(String(data.get("socialLinks") || "")),
+      socialLinks: socialLinksFromForm(form),
       projects: projectsFromForm(form),
     },
     fallback,
@@ -2917,16 +3433,33 @@ async function createOrder(form: HTMLFormElement): Promise<void> {
   await withBusy(async () => {
     if (!signedIn || !actor) throw new Error("Sign in before creating an order.");
     if (isStaticSiteTemplate(selectedTemplate)) {
-      const siteName = String(new FormData(form).get("name") || "").trim();
+      const data = new FormData(form);
+      const siteName = String(data.get("name") || "").trim();
+      const summary = String(data.get("headline") || "").trim();
       const filesError = validateStaticSiteFiles(staticSiteFiles);
       if (filesError) throw new Error(filesError);
       draftConfig = staticSiteConfigFromDraft(siteName, staticSiteFiles);
+      if (summary) {
+        draftConfig = { ...draftConfig, headline: summary };
+      }
     } else {
       syncAccentColorFields(form);
       draftConfig = previewConfigFromForm(form);
       const projectsError = validateProjectsInForm(form, draftConfig.projects);
       if (projectsError) {
         throw new Error(projectsError);
+      }
+      const socialError = draftConfig.socialLinks.find(
+        (link) =>
+          (link.labelText && !link.url) ||
+          (link.url && !link.labelText) ||
+          (link.url && !isHttpsUrl(link.url)) ||
+          link.labelText.length > 32,
+      );
+      if (socialError) {
+        throw new Error(
+          "Each social link needs a label (≤32 chars) and an https:// URL.",
+        );
       }
       const validationError = validatePreviewConfig(draftConfig);
       if (validationError) {
@@ -3219,6 +3752,19 @@ async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
       throw new Error(validationError);
     }
 
+    const socialError = nextConfig.socialLinks.find(
+      (link) =>
+        (link.labelText && !link.url) ||
+        (link.url && !link.labelText) ||
+        (link.url && !isHttpsUrl(link.url)) ||
+        link.labelText.length > 32,
+    );
+    if (socialError) {
+      throw new Error(
+        "Each social link needs a label (≤32 chars) and an https:// URL.",
+      );
+    }
+
     currentOrder = unwrapResult(
       await actor.updateDeploymentOrderConfig(
         currentOrder.id,
@@ -3226,7 +3772,7 @@ async function saveLivePortfolioConfig(form: HTMLFormElement): Promise<void> {
       ),
     );
     await loadOrders();
-    notice = "Live app updated.";
+    notice = "Live app content updated. Refresh the open site tab to see changes.";
   }, "Updating the live app canister...");
 }
 

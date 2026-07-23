@@ -144,18 +144,29 @@ export function appPreviewDocument(
   const primaryLink = safeHttpsUrl(config.primaryLink);
   const resumeUrl = safeHttpsUrl(config.resumeUrl);
   const heroImageUrl = safeImageUrl(config.heroImageUrl);
+  const primaryCta =
+    templateId === "startup" ? "Get started" : "Explore the work";
+  const secondaryCta =
+    templateId === "startup" ? "Learn more" : "Resume";
+  const aboutLabel = templateId === "startup" ? "Product" : "About";
+  const projectsLabel = templateId === "startup" ? "Highlights" : "Projects";
+  const projectsKicker =
+    templateId === "startup" ? "Why it matters" : "Selected work";
+  const heroPlaceholder =
+    templateId === "startup" ? "Launch" : "Portfolio";
+
   const linkMarkup = primaryLink
-    ? `<a class="primary" href="${escapeHtml(primaryLink)}" target="_blank" rel="noreferrer">Explore the work</a>`
+    ? `<a class="primary" href="${escapeHtml(primaryLink)}" target="_blank" rel="noreferrer">${escapeHtml(primaryCta)}</a>`
     : "";
   const resumeMarkup = resumeUrl
-    ? `<a class="secondary" href="${escapeHtml(resumeUrl)}" target="_blank" rel="noreferrer">Resume</a>`
+    ? `<a class="secondary" href="${escapeHtml(resumeUrl)}" target="_blank" rel="noreferrer">${escapeHtml(secondaryCta)}</a>`
     : "";
   const contactMarkup = safeContact
     ? `<span>${safeContact}</span>`
     : "<span>Built on the Internet Computer</span>";
   const heroMediaMarkup = heroImageUrl
     ? `<figure class="hero-media"><img src="${escapeHtml(heroImageUrl)}" alt="" loading="eager"></figure>`
-    : `<figure class="hero-media empty"><span>ICP</span><strong>Portfolio</strong></figure>`;
+    : `<figure class="hero-media empty"><span>ICP</span><strong>${escapeHtml(heroPlaceholder)}</strong></figure>`;
 
   const footerLabel =
     templateId === "portfolio"
@@ -165,6 +176,17 @@ export function appPreviewDocument(
         : templateId === "static-site"
           ? "Owner-managed static site on ICP"
           : "Deployed on the Internet Computer";
+
+  const aboutSection =
+    about || config.skills.length > 0 || config.socialLinks.length > 0
+      ? `<section class="section"><div class="section-heading"><span>${escapeHtml(aboutLabel)}</span><h2>${safeName}</h2></div><div class="about-grid"><p class="about-copy">${about || safeDescription}</p><div>${renderSkills(
+          config.skills,
+        )}${renderSocialLinks(config.socialLinks)}</div></div></section>`
+      : "";
+
+  const projectsSection = renderProjects(config.projects)
+    .replace("Selected work", escapeHtml(projectsKicker))
+    .replace("Projects", escapeHtml(projectsLabel));
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -194,9 +216,7 @@ body.template-startup .hero{min-height:auto;padding-top:56px}body.template-start
     templateEyebrow(templateId),
   )}</div>
 <h1>${safeHeadline}</h1><p class="lede">${safeDescription}</p><div class="actions">${linkMarkup}${resumeMarkup}</div></div>${heroMediaMarkup}</section>
-<section class="section"><div class="section-heading"><span>About</span><h2>${safeName}</h2></div><div class="about-grid"><p class="about-copy">${about}</p><div>${renderSkills(
-    config.skills,
-  )}${renderSocialLinks(config.socialLinks)}</div></div></section>
-${renderProjects(config.projects)}
+${aboutSection}
+${projectsSection}
 <div class="footer"><strong>${safeName}</strong>${contactMarkup}<span>${escapeHtml(footerLabel)}</span></div></main></body></html>`;
 }
